@@ -31,9 +31,16 @@ type Service interface {
 	prefix() string
 }
 
-// Lock represents a client's lock on updating keys. When the same client requests multiple locks,
-// the lock is extended. Assumes that one client does not try to set the same key from different
-// go routines. In this case, a race condition exists and last write wins.
+// Lock represents a distributed lock in etcd. Features:
+//   - Unique token per client for lock ownership
+//   - Automatic lock extension for same client
+//   - Configurable lock timeouts
+//   - Automatic cleanup of stale locks
+//   - Safe concurrent access across cluster
+//
+// Note: The implementation assumes a single client does not attempt to acquire
+// the same lock from multiple goroutines simultaneously. Such usage may result
+// in race conditions where the last write wins.
 type Lock struct {
 	Token    string // Random token identifying the client holding the lock
 	Obtained string // UTC timestamp when the lock was obtained
@@ -69,12 +76,18 @@ func init() {
 	token = base64.StdEncoding.EncodeToString(tok)
 }
 
-// NewService returns a new low level service to store and load values in etcd.  The service is designed to store values with
-// associated metadata in a format that allows it to fulfill with the Certmagic storage interface, effectively implementing simple
-// filesystem semantics on top of etcd key/value storage.  Locks are acquired before writes to etcd and the library will make its
-// best attempt at rolling back transactions that fail.  Concurrent writes are blocking with exponential backoff up to a reasonable
-// time limit.  Errors are logged, but do not guarantee that the system will return to a coherent pre-transaction state in the
-// presence of significant etcd failures or prolonged unavailability.
+// NewService returns a new low level service to store and load values in etcd. The service implements
+// filesystem-like semantics on top of etcd's key/value storage, with support for:
+//   - Atomic transactions for data consistency
+//   - Metadata tracking for each stored value
+//   - Directory-like operations with recursive listing
+//   - Distributed locking with configurable timeouts
+//   - Automatic connection management and retries
+//   - Data integrity verification via checksums
+//
+// The service uses exponential backoff for retries and transactions to handle temporary failures.
+// While best efforts are made to maintain consistency, prolonged etcd unavailability may impact
+// the system's ability to recover to a fully coherent state.
 func NewService(c *ClusterConfig) (Service, error) {
 	cli, err := getClient(c)
 	if err != nil {

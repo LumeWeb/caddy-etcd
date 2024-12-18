@@ -46,9 +46,13 @@ type ConnectionConfig struct {
 	RejectOldCluster bool     `json:"reject_old_cluster,omitempty"`
 }
 
-// ClusterConfig maintains configuration information for cluster
-// resources such as etcd server instances
-// TLSConfig holds TLS configuration settings
+// ClusterConfig maintains configuration for connecting to and interacting with etcd.
+// It includes settings for:
+//   - Server endpoints and key prefixes
+//   - TLS security and authentication
+//   - Connection timeouts and keepalive settings
+//   - Lock timeouts and operational parameters
+//   - Optional Caddyfile loading configuration
 type TLSConfig struct {
 	CertFile   string `json:"cert_file,omitempty"`
 	KeyFile    string `json:"key_file,omitempty"`
