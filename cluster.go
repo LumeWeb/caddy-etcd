@@ -31,14 +31,14 @@ var (
 // It provides distributed locking, atomic operations, and consistent storage
 // across multiple Caddy instances in a cluster.
 type Cluster struct {
-	srv Service       // The etcd service interface
+	srv Service        // The etcd service interface
 	cfg *ClusterConfig // Configuration for etcd connection and behavior
 }
 
 // CaddyModule returns the Caddy module information.
 func (Cluster) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID: "storage.etcd",
+		ID: "caddy.storage.etcd",
 		New: func() caddy.Module {
 			opts, err := ConfigOptsFromEnvironment()
 			if err != nil {
