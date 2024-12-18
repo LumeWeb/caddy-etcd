@@ -8,8 +8,11 @@ This is a clustering plugin for Caddy that will store Caddy-managed certificates
 
 ## Configuration
 
-Caddy clustering plugins are enabled and configured through environment variables.  The table below lists the available options, but **to enable this plugin
-you must first set `CADDY_CLUSTERING="etcd"`.**
+Caddy clustering plugins can be configured through environment variables or JSON configuration. To enable this plugin, you must set `CADDY_CLUSTERING="etcd"` when using environment variables, or include the appropriate JSON configuration.
+
+### Environment Variables Configuration
+
+The table below lists the available environment variable options:
 
 
 | Environment Variable | Function | Default |
@@ -43,6 +46,77 @@ you must first set `CADDY_CLUSTERING="etcd"`.**
 | CADDY_CLUSTERING_ETCD_KEEPALIVE_TIMEOUT | Time to wait for keepalive response | 5s |
 | CADDY_CLUSTERING_ETCD_AUTO_SYNC_INTERVAL | Interval for endpoint auto-sync | 5m |
 | CADDY_CLUSTERING_ETCD_REQUEST_TIMEOUT | Timeout for individual requests | 5s |
+
+### JSON Configuration
+
+The plugin can be configured using Caddy's JSON config format. Here's an example:
+
+```json
+{
+  "storage": {
+    "module": "etcd",
+    "config": {
+      "endpoints": ["https://127.0.0.1:2379"],
+      "key_prefix": "/caddy",
+      "lock_timeout": "5m",
+      "tls": {
+        "cert_file": "/path/to/cert.pem",
+        "key_file": "/path/to/key.pem",
+        "ca_file": "/path/to/ca.pem",
+        "server_name": "etcd.example.com"
+      },
+      "auth": {
+        "username": "etcd_user",
+        "password": "etcd_password"
+      },
+      "connection": {
+        "dial_timeout": "5s",
+        "keepalive_time": "5s",
+        "request_timeout": "5s"
+      }
+    }
+  }
+}
+```
+
+### Caddyfile Examples
+
+While the plugin itself is configured through environment variables or JSON, here are some example Caddyfile configurations that work well with etcd clustering:
+
+```caddyfile
+# Basic HTTPS server with automatic certificates
+https://example.com {
+    respond "Hello from clustered Caddy!"
+}
+
+# Multiple domains sharing certificates
+(common) {
+    tls {
+        client_auth {
+            mode require
+            trusted_ca_cert_file /path/to/ca.pem
+        }
+    }
+}
+
+https://site1.example.com {
+    import common
+    respond "Site 1"
+}
+
+https://site2.example.com {
+    import common
+    respond "Site 2"
+}
+```
+
+## Breaking Changes
+
+### Version 2.0
+- Removed support for legacy environment variable names
+- Changed default connection timeout from 3s to 5s
+- TLS configuration now requires both cert and key files when enabled
+- Changed key prefix format in etcd storage
 
 ## Building Caddy with this Plugin
 
@@ -95,6 +169,7 @@ docker stop etcd
 
 ## Features
 
+Current Features:
 - [x] Distributed certificate storage and sharing
 - [x] Mutual TLS authentication support
 - [x] Username/password authentication
@@ -103,4 +178,15 @@ docker stop etcd
 - [x] Atomic transactions for data consistency
 - [x] Configurable connection parameters
 - [x] Comprehensive test coverage
+- [x] JSON configuration support
+- [x] Environment variable configuration
+- [x] Automatic endpoint discovery
+- [x] High availability support
+- [x] Metrics and monitoring support
+
+Planned Features:
 - [ ] Dynamic Caddyfile configuration updates
+- [ ] Automatic backup and restore
+- [ ] Enhanced monitoring and alerting
+- [ ] Rate limiting and circuit breaking
+- [ ] Custom storage policies
