@@ -1,107 +1,159 @@
-// package etcd adds clustering capabilities to caddy to store all Caddy-managed certificates
-// and caddyfile to etcd
+// Package etcd implements a distributed storage backend for Caddy using etcd
 package etcd
 
 import (
+	"context"
+	"fmt"
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/certmagic"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.uber.org/zap"
 	"log"
-
-	"github.com/mholt/caddy"
-	"github.com/mholt/caddy/caddytls"
-	"github.com/mholt/certmagic"
+	"strings"
 )
 
-// ensure that cluster implements certmagic.Storage
-var _ certmagic.Storage = Cluster{}
-
-// register plugin
 func init() {
-	caddytls.RegisterClusterPlugin("etcd", NewCluster)
-	caddy.RegisterCaddyfileLoader("etcd", caddy.LoaderFunc(Load))
+	caddy.RegisterModule(Cluster{})
 }
 
-// Cluster implements the certmagic.Storage interface as a cluster plugin
+// logger provides structured logging using Caddy's logger
+var logger *zap.Logger
+
+// Interface guards
+var (
+	_ caddy.StorageConverter = (*Cluster)(nil)
+	_ certmagic.Storage      = (*Cluster)(nil)
+	_ caddyfile.Unmarshaler  = (*Cluster)(nil)
+	_ caddy.Provisioner      = (*Cluster)(nil)
+	_ caddy.Validator        = (*Cluster)(nil)
+)
+
+// Cluster implements certmagic.Storage using etcd as the storage backend
 type Cluster struct {
 	srv Service
+	cfg *ClusterConfig
 }
 
-// NewCluster returns a cluster plugin that reads from the environment to configure itself
-func NewCluster() (certmagic.Storage, error) {
-	log.Printf("Activating etcd clustering")
-	opts := ConfigOptsFromEnvironment()
-	c, err := NewClusterConfig(opts...)
-	if err != nil {
-		return Cluster{}, err
+// CaddyModule returns the Caddy module information.
+func (Cluster) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID: "storage.etcd",
+		New: func() caddy.Module {
+			opts, err := ConfigOptsFromEnvironment()
+			if err != nil {
+				log.Fatal("failed to get config from environment", err)
+			}
+
+			c, err := NewClusterConfig(opts...)
+			if err != nil {
+				log.Fatal("failed to create cluster config", err)
+			}
+			return &Cluster{cfg: c}
+		},
 	}
-	return Cluster{
-		srv: NewService(c),
-	}, nil
 }
 
-// Lock fulfills the certmagic.Storage Locker interface.  Each etcd operation gets a lock
-// scoped to the key it is updating with a customizable timeout.  Locks that persist past
-// the timeout are assumed to be abandoned.
-func (c Cluster) Lock(key string) error {
+// Provision sets up the storage backend.
+func (c *Cluster) Provision(ctx caddy.Context) error {
+	logger = ctx.Logger()
+
+	opts, err := ConfigOptsFromEnvironment()
+	if err != nil {
+		logger.Error("failed to get config from environment",
+			zap.Error(err))
+		return err
+	}
+
+	cfg, err := NewClusterConfig(opts...)
+	if err != nil {
+		logger.Error("failed to create cluster config",
+			zap.Error(err))
+		return err
+	}
+
+	srv, err := NewService(cfg)
+	if err != nil {
+		logger.Error("failed to create etcd service",
+			zap.Error(err))
+		return err
+	}
+
+	c.srv = srv
+	c.cfg = cfg
+	logger.Info("etcd storage backend provisioned",
+		zap.String("prefix", cfg.KeyPrefix),
+		zap.Strings("endpoints", cfg.ServerIP))
+	return nil
+}
+
+// CertMagicStorage converts c to a certmagic.Storage instance.
+func (c Cluster) CertMagicStorage() (certmagic.Storage, error) {
+	return c, nil
+}
+
+// Validate implements caddy.Validator and validates the configuration.
+func (c *Cluster) Validate() error {
+	if c.srv == nil {
+		return fmt.Errorf("etcd service not initialized")
+	}
+	return nil
+}
+
+// Lock acquires a lock at the given key.
+func (c Cluster) Lock(_ context.Context, key string) error {
 	return c.srv.Lock(key)
 }
 
-// Unlock fulfills the certmagic.Storage Locker interface.  Locks are cleared on a per
-// path basis.
-func (c Cluster) Unlock(key string) error {
+// Unlock releases the lock at the given key.
+func (c Cluster) Unlock(_ context.Context, key string) error {
 	return c.srv.Unlock(key)
 }
 
-// Store fulfills the certmagic.Storage interface.  Each storage operation results in two nodes
-// added to etcd.  A node is created for the value of the file being stored.  A matching metadata
-// node is created to keep details of creation time, SHA1 hash, and size of the node.  Failures to create
-// both nodes in a single transaction make a best effort at restoring the pre-transaction state.
-func (c Cluster) Store(key string, value []byte) error {
+// Store saves the given value at the given key.
+func (c Cluster) Store(_ context.Context, key string, value []byte) error {
 	return c.srv.Store(key, value)
 }
 
-// Load fulfills the certmagic.Storage interface.  Each load operation retrieves the value associated
-// at the file node and checks it against the hash stored in the metadata node associated with the file.
-// If the node does not exist, a `NotExist` error is returned.  Data corruption found via a hash mismatch
-// returns a `FailedChecksum` error.
-func (c Cluster) Load(key string) ([]byte, error) {
+// Load retrieves the value at the given key.
+func (c Cluster) Load(_ context.Context, key string) ([]byte, error) {
 	return c.srv.Load(key)
 }
 
-// Exists fulfills the certmagic.Storage interface.  Exists returns true only if the there is a terminal
-// node that exists which represents a file in a filesystem.
-func (c Cluster) Exists(key string) bool {
-	_, err := c.srv.Metadata(key)
-	switch {
-	case err == nil:
-		return true
-	case IsNotExistError(err):
-		return false
-	default:
-		return false
-	}
-}
-
-// Delete fulfills the certmagic.Storage interface and deletes the node located at key along with any
-// associated metadata.
-func (c Cluster) Delete(key string) error {
+// Delete deletes the value at the given key.
+func (c Cluster) Delete(_ context.Context, key string) error {
 	return c.srv.Delete(key)
 }
 
-// List fulfills the certmagic.Storage interface and lists all nodes that exist under path `prefix`.  For
-// recursive queries, it returns all keys located at subdirectories of `prefix`.  Otherwise, it only returns
-// terminal nodes that represent files present at exactly the patch `prefix`.
-func (c Cluster) List(prefix string, recursive bool) ([]string, error) {
-	switch {
-	case recursive:
-		return c.srv.List(prefix, FilterRemoveDirectories())
-	default:
-		return c.srv.List(prefix, FilterExactPrefix(prefix, c.srv.prefix()))
-	}
+// Exists returns true if the key exists and is accessible.
+func (c Cluster) Exists(_ context.Context, key string) bool {
+	_, err := c.srv.Metadata(key)
+	return err == nil
 }
 
-// Stat fulfills the certmagic.Storage interface and returns metadata about existing nodes.  When the
-// key represents a file in the filesystem, it returns metadata about the file.  For directories, it traverses
-// all children to determine directory size and modified time.
-func (c Cluster) Stat(key string) (certmagic.KeyInfo, error) {
+// List returns all keys that match prefix.
+func (c Cluster) List(_ context.Context, prefix string, recursive bool) ([]string, error) {
+	// Normalize the prefix to always start with /
+	if !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
+	}
+	// Trim any trailing slashes for consistency
+	prefix = strings.TrimSuffix(prefix, "/")
+
+	var filters []func(*mvccpb.KeyValue) bool
+	if recursive {
+		filters = append(filters, FilterRemoveDirectories())
+	} else {
+		// For non-recursive listing, ensure prefix has trailing slash for exact matching
+		searchPrefix := prefix + "/"
+		filters = append(filters, FilterExactPrefix(searchPrefix, c.srv.prefix()))
+	}
+
+	return c.srv.List(prefix, filters...)
+}
+
+// Stat returns information about the given key.
+func (c Cluster) Stat(_ context.Context, key string) (certmagic.KeyInfo, error) {
 	md, err := c.srv.Metadata(key)
 	if err != nil {
 		return certmagic.KeyInfo{}, err

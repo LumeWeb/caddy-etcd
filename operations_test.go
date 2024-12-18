@@ -5,18 +5,13 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
-	"encoding/json"
-	"io/ioutil"
-	"log"
-	"net/http"
 	"path"
 	"strings"
 	"testing"
 
-	"github.com/cenkalti/backoff"
+	"github.com/cenkalti/backoff/v4"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
-	"go.etcd.io/etcd/client"
 )
 
 func TestPipeline(t *testing.T) {
@@ -71,10 +66,8 @@ func TestLowLevelSet(t *testing.T) {
 	if !shouldRunIntegration() {
 		t.Skip("no etcd server found, skipping")
 	}
-	cfg := &ClusterConfig{
-		KeyPrefix: "/caddy",
-		ServerIP:  []string{"http://127.0.0.1:2379"},
-	}
+	h := newTestHelper(t)
+	defer h.cleanup()
 	tcs := []struct {
 		Path  string
 		Value []byte
@@ -84,92 +77,78 @@ func TestLowLevelSet(t *testing.T) {
 		{Path: "/deeply/nested/value.md", Value: []byte("test")},
 	}
 	for _, tc := range tcs {
-		cli, err := getClient(cfg)
-		assert.NoError(t, err)
-		errC := set(cli, path.Join(cfg.KeyPrefix, tc.Path), tc.Value)()
+		errC := set(h.client, path.Join(h.cfg.KeyPrefix, tc.Path), tc.Value)()
 		assert.NoError(t, errC)
-		resp, err := http.Get("http://127.0.0.1:2379" + path.Join("/v2/keys/caddy/", tc.Path))
-		if err != nil {
-			log.Print(err)
-			t.FailNow()
-		}
-		defer resp.Body.Close()
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			t.Fail()
-		}
-		var node client.Response
-		if err := json.Unmarshal(body, &node); err != nil {
-			t.Fail()
-		}
-		assert.Equal(t, path.Join("/caddy", tc.Path), node.Node.Key)
-		assert.Equal(t, base64.StdEncoding.EncodeToString(tc.Value), node.Node.Value)
+
+		// Verify using Get
+		resp, err := h.client.Get(context.Background(), path.Join(h.cfg.KeyPrefix, tc.Path))
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(resp.Kvs))
+		assert.Equal(t, path.Join(h.cfg.KeyPrefix, tc.Path), string(resp.Kvs[0].Key))
+		assert.Equal(t, base64.StdEncoding.EncodeToString(tc.Value), string(resp.Kvs[0].Value))
 	}
 }
 
 func TestLowLevelGet(t *testing.T) {
-	if !shouldRunIntegration() {
-		t.Skip("no etcd server found, skipping")
-	}
-	cfg := &ClusterConfig{
-		KeyPrefix: "/caddy",
-		ServerIP:  []string{"http://127.0.0.1:2379"},
-	}
-	tcs := []struct {
-		Path  string
-		Value []byte
-	}{
-		{Path: "test", Value: []byte("test")},
-		{Path: "/test", Value: []byte("test")},
-		{Path: "/deeply/nested/value", Value: []byte("test")},
-	}
-	for _, tc := range tcs {
-		cli, err := getClient(cfg)
-		if err != nil {
-			t.Fail()
-		}
-		if err := set(cli, cfg.KeyPrefix+tc.Path, tc.Value)(); err != nil {
-			t.Fail()
-		}
-		var buf bytes.Buffer
-		errC := get(cli, cfg.KeyPrefix+tc.Path, &buf)()
-		resp, err := ioutil.ReadAll(&buf)
-		if err != nil {
-			t.Fail()
-		}
-		assert.NoError(t, errC)
-		assert.Equal(t, tc.Value, resp)
-	}
+    if !shouldRunIntegration() {
+        t.Skip("no etcd server found, skipping")
+    }
+    h := newTestHelper(t)
+    defer h.cleanup()
+
+    tcs := []struct {
+        Path  string
+        Value []byte
+    }{
+        {Path: "test", Value: []byte("test")},
+        {Path: "/test", Value: []byte("test")},
+        {Path: "/deeply/nested/value", Value: []byte("test")},
+    }
+    
+    // Use the test helper's client instead of creating new ones
+    for _, tc := range tcs {
+        // Set value first
+        err := set(h.client, path.Join(h.cfg.KeyPrefix, tc.Path), tc.Value)()
+        assert.NoError(t, err)
+
+        // Test get operation
+        var buf bytes.Buffer
+        errC := get(h.client, path.Join(h.cfg.KeyPrefix, tc.Path), &buf)()
+        assert.NoError(t, errC)
+        assert.Equal(t, tc.Value, buf.Bytes())
+
+        // Test non-existent key
+        var emptyBuf bytes.Buffer
+        errD := get(h.client, path.Join(h.cfg.KeyPrefix, "nonexistent"), &emptyBuf)()
+        assert.NoError(t, errD)
+        assert.Equal(t, 0, emptyBuf.Len())
+    }
 }
 
 func TestLowLevelMD(t *testing.T) {
-
 	if !shouldRunIntegration() {
 		t.Skip("no etcd server found, skipping")
 	}
-	cfg := &ClusterConfig{
-		KeyPrefix: "/caddy",
-		ServerIP:  []string{"http://127.0.0.1:2379"},
-	}
+	h := newTestHelper(t)
+	defer h.cleanup()
+
 	data := []byte("test data")
 	expSum := sha1.Sum(data)
 	p := "/testmd/some/path/key.md"
-	key := path.Join(cfg.KeyPrefix, p)
+	key := path.Join(h.cfg.KeyPrefix, p)
 	md := NewMetadata(p, data)
+
 	assert.Equal(t, p, md.Path)
 	assert.Equal(t, expSum, md.Hash)
 	assert.Equal(t, len(data), md.Size)
-	cli, err := getClient(cfg)
-	if err != nil {
-		t.Fail()
-	}
-	if err := setMD(cli, key, md)(); err != nil {
-		assert.NoError(t, err)
-	}
+
+	err := setMD(h.client, key, md)()
+	assert.NoError(t, err)
+
 	var md2 Metadata
-	if err := getMD(cli, key, &md2)(); err != nil {
-		assert.NoError(t, err)
-	}
+	err = getMD(h.client, key, &md2)()
+	assert.NoError(t, err)
+
 	assert.Equal(t, md, md2)
 	assert.Equal(t, expSum, md2.Hash)
 	assert.Equal(t, len(data), md2.Size)
@@ -180,10 +159,9 @@ func TestListLowLevel(t *testing.T) {
 	if !shouldRunIntegration() {
 		t.Skip("no etcd server found, skipping")
 	}
-	cfg := &ClusterConfig{
-		KeyPrefix: "/caddy",
-		ServerIP:  []string{"http://127.0.0.1:2379"},
-	}
+	h := newTestHelper(t)
+	defer h.cleanup()
+
 	paths := []string{
 		"/one/two/three.end",
 		"/one/two/four.end",
@@ -191,61 +169,21 @@ func TestListLowLevel(t *testing.T) {
 		"/one/five/eleven.end",
 		"/one/five/six/ten.end",
 	}
-	cli, err := getClient(cfg)
-	assert.NoError(t, err)
+
 	for _, p := range paths {
-		if err := set(cli, path.Join(cfg.KeyPrefix, p), []byte("test"))(); err != nil {
-			assert.NoError(t, err)
-		}
+		err := set(h.client, path.Join(h.cfg.KeyPrefix, p), []byte("test"))()
+		assert.NoError(t, err)
 	}
-	out, err := list(cli, path.Join(cfg.KeyPrefix, "one"))
+
+	out, err := list(h.client, path.Join(h.cfg.KeyPrefix, "one"))
 	assert.NoError(t, err)
+
 	var s []string
 	for _, n := range out {
-		s = append(s, strings.TrimPrefix(n.Key, cfg.KeyPrefix))
+		s = append(s, strings.TrimPrefix(string(n.Key), h.cfg.KeyPrefix))
 	}
+
 	for _, p := range paths {
 		assert.Contains(t, s, p)
 	}
-}
-
-func TestWalkNodes(t *testing.T) {
-	if !shouldRunIntegration() {
-		t.Skip("no etcd server found, skipping")
-	}
-	cfg := &ClusterConfig{
-		KeyPrefix: "/caddy",
-		ServerIP:  []string{"http://127.0.0.1:2379"},
-	}
-	paths := []string{
-		"/testwalk/one/one.end",
-		"/testwalk/one/two/three.end",
-		"/testwalk/one/two/four.end",
-		"/testwalk/two/five/six/seven.end",
-		"/testwalk/two/five/eleven.end",
-		"/testwalk/two/five/six/ten.end",
-	}
-	cli, err := getClient(cfg)
-	assert.NoError(t, err)
-	for _, p := range paths {
-		if err := set(cli, p, []byte("test"))(); err != nil {
-			assert.NoError(t, err)
-		}
-	}
-	nodes := new([]client.Node)
-	resp, err := cli.Get(context.Background(), "/testwalk", &client.GetOptions{
-		Recursive: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	walkNodes(resp.Node, nodes)
-	var nodeNames []string
-	for _, node := range *nodes {
-		nodeNames = append(nodeNames, node.Key)
-	}
-	for _, p := range paths {
-		assert.Contains(t, nodeNames, p)
-	}
-
 }

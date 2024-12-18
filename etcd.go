@@ -1,53 +1,55 @@
 package etcd
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"github.com/cenkalti/backoff/v4"
+	"github.com/pkg/errors"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"log"
 	"path"
 	"strings"
 	"time"
-
-	"github.com/cenkalti/backoff"
-	"github.com/pkg/errors"
-	"go.etcd.io/etcd/client"
 )
 
 // token is a random value used to manage locks
 var token string
 
-func init() {
-	tok := make([]byte, 32)
-	_, err := rand.Read(tok)
-	if err != nil {
-		log.Fatal(err)
-	}
-	token = base64.StdEncoding.EncodeToString(tok)
+type Service interface {
+	Store(key string, value []byte) error
+	Load(key string) ([]byte, error)
+	Delete(key string) error
+	Metadata(key string) (*Metadata, error)
+	Lock(key string) error
+	Unlock(key string) error
+	List(path string, filters ...func(*mvccpb.KeyValue) bool) ([]string, error)
+	prefix() string
 }
 
-// Lock is a clients lock on updating keys.  When the same client requests multiple locks, the
-// lock is extended.  Assumes that one client does not try to set the same key from different
-// go routines.  In this case, a race condition exists and last write wins.
+// Lock represents a client's lock on updating keys. When the same client requests multiple locks,
+// the lock is extended. Assumes that one client does not try to set the same key from different
+// go routines. In this case, a race condition exists and last write wins.
 type Lock struct {
-	Token    string
-	Obtained string
-	Key      string
+	Token    string // Random token identifying the client holding the lock
+	Obtained string // UTC timestamp when the lock was obtained
+	Key      string // The key being locked
 }
 
 // Metadata stores information about a particular node that represents a file in etcd
 type Metadata struct {
-	Path      string
-	Size      int
-	Timestamp time.Time
-	Hash      [20]byte
-	IsDir     bool
+	Path      string    // Full path to the node
+	Size      int       // Size of the value in bytes
+	Timestamp time.Time // Last modification time
+	Hash      [20]byte  // SHA1 hash of the value
+	IsDir     bool      // Whether this node represents a directory
 }
 
-// NewMetadata returns a metadata information given a path and a file to be stored at the path.
+// NewMetadata returns metadata information given a path and a file to be stored at the path.
 // Typically, one metadata node is stored for each file node in etcd.
 func NewMetadata(key string, data []byte) Metadata {
 	return Metadata{
@@ -58,24 +60,13 @@ func NewMetadata(key string, data []byte) Metadata {
 	}
 }
 
-// Service is a low level interface that stores and loads values in Etcd
-type Service interface {
-	Store(key string, value []byte) error
-	Load(key string) ([]byte, error)
-	Delete(key string) error
-	Metadata(key string) (*Metadata, error)
-	Lock(key string) error
-	Unlock(key string) error
-	List(path string, filters ...func(client.Node) bool) ([]string, error)
-	prefix() string
-}
-
-type etcdsrv struct {
-	mdPrefix string
-	lockKey  string
-	cfg      *ClusterConfig
-	// set noBackoff to true to disable exponential backoff retries
-	noBackoff bool
+func init() {
+	tok := make([]byte, 32)
+	_, err := rand.Read(tok)
+	if err != nil {
+		log.Fatal(err)
+	}
+	token = base64.StdEncoding.EncodeToString(tok)
 }
 
 // NewService returns a new low level service to store and load values in etcd.  The service is designed to store values with
@@ -84,12 +75,26 @@ type etcdsrv struct {
 // best attempt at rolling back transactions that fail.  Concurrent writes are blocking with exponential backoff up to a reasonable
 // time limit.  Errors are logged, but do not guarantee that the system will return to a coherent pre-transaction state in the
 // presence of significant etcd failures or prolonged unavailability.
-func NewService(c *ClusterConfig) Service {
+func NewService(c *ClusterConfig) (Service, error) {
+	cli, err := getClient(c)
+	if err != nil {
+		return nil, err
+	}
+
 	return &etcdsrv{
 		mdPrefix: path.Join(c.KeyPrefix + "/md"),
 		lockKey:  path.Join(c.KeyPrefix, "/lock"),
 		cfg:      c,
-	}
+		cli:      cli,
+	}, nil
+}
+
+type etcdsrv struct {
+	mdPrefix  string
+	lockKey   string
+	cfg       *ClusterConfig
+	cli       *clientv3.Client
+	noBackoff bool
 }
 
 // Lock acquires a lock with a maximum lifetime specified by the ClusterConfig
@@ -97,28 +102,26 @@ func (e *etcdsrv) Lock(key string) error {
 	return e.lock(token, key)
 }
 
-// Lock acquires a lock with a maximum lifetime specified by the ClusterConfig
+// lock is an internal function that acquires a lock with the given token
 func (e *etcdsrv) lock(tok string, key string) error {
-	c, err := getClient(e.cfg)
-	if err != nil {
-		return errors.Wrap(err, "failed to create etcd client while getting lock")
-	}
+	lockKey := path.Join(e.lockKey, key)
+
 	acquire := func() error {
-		var okToSet bool
-		resp, err := c.Get(context.Background(), path.Join(e.lockKey, key), nil)
+		// Use a longer timeout for lock operations
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		resp, err := e.cli.Get(ctx, lockKey)
 		if err != nil {
-			switch {
-			// no existing lock
-			case client.IsKeyNotFound(err):
-				okToSet = true
-				break
-			default:
-				return errors.Wrap(err, "lock: failed to get existing lock")
-			}
+			return errors.Wrap(err, "lock: failed to get existing lock")
 		}
-		if resp != nil {
+
+		var okToSet bool
+		if len(resp.Kvs) == 0 {
+			okToSet = true
+		} else {
 			var l Lock
-			b, err := base64.StdEncoding.DecodeString(resp.Node.Value)
+			b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
 			if err != nil {
 				return errors.Wrap(err, "lock: failed to decode base64 lock representation")
 			}
@@ -129,18 +132,17 @@ func (e *etcdsrv) lock(tok string, key string) error {
 			if err := lockTime.UnmarshalText([]byte(l.Obtained)); err != nil {
 				return errors.Wrap(err, "lock: failed to unmarshal time")
 			}
-			switch {
-			// lock request from same client extend existing lock
-			case l.Token == tok:
+
+			// lock request from same client extends existing lock
+			if l.Token == tok {
 				okToSet = true
-				break
+			}
 			// orphaned locks that are past lock timeout allow new lock
-			case time.Now().UTC().Sub(lockTime) >= e.cfg.LockTimeout:
+			if time.Now().UTC().Sub(lockTime) >= e.cfg.LockTimeout.Duration {
 				okToSet = true
-				break
-			default:
 			}
 		}
+
 		if okToSet {
 			now, err := time.Now().UTC().MarshalText()
 			if err != nil {
@@ -155,24 +157,29 @@ func (e *etcdsrv) lock(tok string, key string) error {
 			if err != nil {
 				return errors.Wrap(err, "lock: failed to marshal new lock")
 			}
-			if _, err := c.Set(context.Background(), path.Join(e.lockKey, key), base64.StdEncoding.EncodeToString(b), nil); err != nil {
+			_, err = e.cli.Put(ctx, lockKey, base64.StdEncoding.EncodeToString(b))
+			if err != nil {
 				return errors.Wrap(err, "failed to get lock")
 			}
 			return nil
 		}
-		return errors.New("lock: failed to obtain lock, already exists")
+		return LockError{
+			Key:     key,
+			Timeout: e.cfg.LockTimeout.Duration,
+			Err:     fmt.Errorf("lock already exists"),
+		}
 	}
 	return e.execute(acquire)
 }
 
-// Unlock releases the current lock
+// Unlock releases the lock for the given key
 func (e *etcdsrv) Unlock(key string) error {
-	c, err := getClient(e.cfg)
-	if err != nil {
-		return errors.Wrap(err, "failed to create etcd client while getting lock")
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // Increased timeout for list operations
+	defer cancel()
+
 	release := func() error {
-		if _, err := c.Delete(context.Background(), path.Join(e.lockKey, key), nil); err != nil {
+		_, err := e.cli.Delete(ctx, path.Join(e.lockKey, key))
+		if err != nil {
 			return errors.Wrap(err, "failed to release lock")
 		}
 		return nil
@@ -186,156 +193,290 @@ func (e *etcdsrv) execute(o backoff.Operation) error {
 	case true:
 		return o()
 	default:
-		return backoff.Retry(o, backoff.NewExponentialBackOff())
+		b := backoff.NewExponentialBackOff()
+		b.MaxElapsedTime = 30 * time.Second
+		b.InitialInterval = 100 * time.Millisecond
+		b.MaxInterval = 5 * time.Second
+		return backoff.Retry(o, b)
 	}
 }
 
-// Store stores a value at key. This function attempts to rollback to a prior value
-// if there is an error in the transaction.
+func (e *etcdsrv) List(key string, filters ...func(*mvccpb.KeyValue) bool) ([]string, error) {
+    // Normalize the key to always start with /
+    if !strings.HasPrefix(key, "/") {
+        key = "/" + key
+    }
+
+    // Create the full search path including the etcd prefix
+    searchKey := path.Join(e.cfg.KeyPrefix, key)
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    // Get all keys with the prefix
+    resp, err := e.cli.Get(ctx, searchKey, clientv3.WithPrefix())
+    if err != nil {
+        return nil, errors.Wrap(err, "List: failed to get keys")
+    }
+
+    var out []string
+    prefixLen := len(e.cfg.KeyPrefix)
+
+    // Process and filter the keys
+    for _, kv := range resp.Kvs {
+        if kv == nil || len(kv.Key) <= prefixLen {
+            continue
+        }
+
+        // Get the key relative to the prefix
+        relativeKey := string(kv.Key)[prefixLen:]
+
+        // Skip metadata entries
+        if strings.Contains(relativeKey, "/md/") {
+            continue
+        }
+
+        // Apply all filters
+        skip := false
+        for _, filter := range filters {
+            if !filter(kv) {
+                skip = true
+                break
+            }
+        }
+        if skip {
+            continue
+        }
+
+        // Ensure the key starts with /
+        if !strings.HasPrefix(relativeKey, "/") {
+            relativeKey = "/" + relativeKey
+        }
+
+        out = append(out, relativeKey)
+    }
+
+    return out, nil
+}
+
 func (e *etcdsrv) Store(key string, value []byte) error {
-	cli, err := getClient(e.cfg)
-	if err != nil {
-		return errors.Wrap(err, "store: failed to get client")
-	}
 	storageKey := path.Join(e.cfg.KeyPrefix, key)
 	storageKeyMD := path.Join(e.mdPrefix, key)
 	md := NewMetadata(key, value)
 
-	ex := new(bool)
-	if err := e.execute(exists(cli, storageKeyMD, ex)); err != nil {
-		return errors.Wrap(err, "store: failed to get old metadata")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Increased timeout for store operations
+	defer cancel()
+
+	resp, err := e.cli.Get(ctx, storageKeyMD)
+	if err != nil {
+		return errors.Wrap(err, "store: failed to check metadata")
 	}
-	var commits []backoff.Operation
-	var rollbacks []backoff.Operation
-	switch *ex {
-	case true:
-		mdPrev := new(Metadata)
-		valPrev := new(bytes.Buffer)
-		commits = tx(get(cli, storageKey, valPrev), getMD(cli, storageKeyMD, mdPrev), set(cli, storageKey, value), setMD(cli, storageKeyMD, md))
-		rollbacks = tx(noop(), noop(), set(cli, storageKey, valPrev.Bytes()), setMD(cli, storageKeyMD, *mdPrev))
-	default:
-		commits = tx(set(cli, storageKey, value), setMD(cli, storageKeyMD, md))
-		rollbacks = tx(del(cli, storageKey), del(cli, storageKeyMD))
+
+	txn := e.cli.Txn(ctx)
+
+	if len(resp.Kvs) > 0 {
+		mdBytes, err := json.Marshal(md)
+		if err != nil {
+			return errors.Wrap(err, "store: failed to marshal metadata")
+		}
+		mdEncoded := base64.StdEncoding.EncodeToString(mdBytes)
+
+		txn.Then(
+			clientv3.OpPut(storageKey, base64.StdEncoding.EncodeToString(value)),
+			clientv3.OpPut(storageKeyMD, mdEncoded),
+		)
+	} else {
+		mdBytes, err := json.Marshal(md)
+		if err != nil {
+			return errors.Wrap(err, "store: failed to marshal metadata")
+		}
+		mdEncoded := base64.StdEncoding.EncodeToString(mdBytes)
+
+		txn.Then(
+			clientv3.OpPut(storageKey, base64.StdEncoding.EncodeToString(value)),
+			clientv3.OpPut(storageKeyMD, mdEncoded),
+		)
 	}
-	return pipeline(commits, rollbacks, backoff.NewExponentialBackOff())
+
+	txnResp, err := txn.Commit()
+	if err != nil {
+		return errors.Wrap(err, "store: failed to commit transaction")
+	}
+	if !txnResp.Succeeded {
+		return errors.New("store: transaction failed")
+	}
+
+	return nil
 }
 
-// Load will load the value at key.  If the key does not exist, `NotExist` error is returned.
-// Checksums of the value loaded are checked against the SHA1 hash in the metadata.  If they do not
-// match, a `FailedChecksum` error is returned.
 func (e *etcdsrv) Load(key string) ([]byte, error) {
-	cli, err := getClient(e.cfg)
-	if err != nil {
-		return nil, errors.Wrap(err, "load: failed to get client")
-	}
 	storageKey := path.Join(e.cfg.KeyPrefix, key)
 	storageKeyMD := path.Join(e.mdPrefix, key)
-	ex := new(bool)
-	if err := e.execute(exists(cli, storageKeyMD, ex)); err != nil {
-		return nil, errors.Wrap(err, "load: could not get existence of key")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Increased timeout
+	defer cancel()
+
+	resp, err := e.cli.Get(ctx, storageKeyMD)
+	if err != nil {
+		return nil, errors.Wrap(err, "load: failed to get metadata")
 	}
-	switch *ex {
-	case false:
+	if len(resp.Kvs) == 0 {
 		return nil, NotExist{key}
-	default:
 	}
+
 	md := new(Metadata)
-	if err := e.execute(getMD(cli, storageKeyMD, md)); err != nil {
-		return nil, errors.Wrap(err, "load: could not get metadata")
+	b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
+	if err != nil {
+		return nil, errors.Wrap(err, "load: failed to decode metadata")
 	}
-	dst := new(bytes.Buffer)
-	if err := e.execute(get(cli, storageKey, dst)); err != nil {
-		return nil, errors.Wrap(err, "load: could not get data")
+	if err := json.Unmarshal(b, md); err != nil {
+		return nil, errors.Wrap(err, "load: failed to unmarshal metadata")
 	}
-	value := dst.Bytes()
+
+	valueResp, err := e.cli.Get(ctx, storageKey)
+	if err != nil {
+		return nil, errors.Wrap(err, "load: failed to get value")
+	}
+	if len(valueResp.Kvs) == 0 {
+		return nil, errors.New("load: value not found but metadata exists")
+	}
+
+	value, err := base64.StdEncoding.DecodeString(string(valueResp.Kvs[0].Value))
+	if err != nil {
+		return nil, errors.Wrap(err, "load: failed to decode value")
+	}
+
 	if sha1.Sum(value) != md.Hash {
 		return nil, FailedChecksum{key}
 	}
+
 	return value, nil
 }
 
-// Delete will remove nodes associated with the file at key
 func (e *etcdsrv) Delete(key string) error {
-	cli, err := getClient(e.cfg)
-	if err != nil {
-		return errors.Wrap(err, "load: failed to get client")
-	}
 	storageKey := path.Join(e.cfg.KeyPrefix, key)
 	storageKeyMD := path.Join(e.mdPrefix, key)
-	commits := tx(del(cli, storageKey), del(cli, storageKeyMD))
-	return pipeline(commits, nil, backoff.NewExponentialBackOff())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	txn := e.cli.Txn(ctx)
+	txn.Then(
+		clientv3.OpDelete(storageKey),
+		clientv3.OpDelete(storageKeyMD),
+	)
+
+	txnResp, err := txn.Commit()
+	if err != nil {
+		return errors.Wrap(err, "delete: failed to commit transaction")
+	}
+	if !txnResp.Succeeded {
+		return errors.New("delete: transaction failed")
+	}
+
+	return nil
 }
 
-// Metadata will load the metadata associated with the data at node key.  If the
-// node does not exist, a `NotExist` error is returned and the metadata will be nil.
 func (e *etcdsrv) Metadata(key string) (*Metadata, error) {
-	cli, err := getClient(e.cfg)
-	if err != nil {
-		return nil, errors.Wrap(err, "load: failed to get client")
-	}
 	storageKeyMD := path.Join(e.mdPrefix, key)
-	ex := new(bool)
-	if err := e.execute(exists(cli, storageKeyMD, ex)); err != nil {
-		return nil, errors.Wrap(err, "load: could not get existence of key")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Try direct file lookup first
+	resp, err := e.cli.Get(ctx, storageKeyMD)
+	if err != nil {
+		return nil, errors.Wrap(err, "metadata: failed to get key")
 	}
-	switch *ex {
-	case false:
+
+	if len(resp.Kvs) > 0 {
+		md := new(Metadata)
+		b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
+		if err != nil {
+			return nil, errors.Wrap(err, "metadata: failed to decode base64")
+		}
+		if err := json.Unmarshal(b, md); err != nil {
+			return nil, errors.Wrap(err, "metadata: failed to unmarshal")
+		}
+		md.Path = key
+		return md, nil
+	}
+
+	// Look for children to determine if it's a directory
+	dirResp, err := e.cli.Get(ctx, storageKeyMD+"/", clientv3.WithPrefix())
+	if err != nil {
+		return nil, errors.Wrap(err, "metadata: failed to get directory contents")
+	}
+
+	if len(dirResp.Kvs) == 0 {
 		return nil, NotExist{key}
-	default:
 	}
-	md := new(Metadata)
-	if err := e.execute(getMD(cli, storageKeyMD, md)); err != nil {
-		return nil, errors.Wrap(err, "load: could not get metadata")
+
+	// It's a directory - aggregate metadata from children
+	md := &Metadata{
+		Path:  key,
+		IsDir: true,
 	}
-	// directory virtual nodes need to remove the MD prefix
-	if md.IsDir {
-		md.Path = strings.TrimPrefix(md.Path, e.mdPrefix)
+
+	// Initialize timestamp to oldest possible time
+	md.Timestamp = time.Time{}
+
+	for _, kv := range dirResp.Kvs {
+		childMd := new(Metadata)
+		if err := unmarshalMDv3(kv.Value, childMd); err != nil {
+			continue
+		}
+		md.Size += childMd.Size
+		if childMd.Timestamp.After(md.Timestamp) {
+			md.Timestamp = childMd.Timestamp
+		}
 	}
+
+	// If no valid timestamps were found, use current time
+	if md.Timestamp.IsZero() {
+		md.Timestamp = time.Now().UTC()
+	}
+
 	return md, nil
 }
 
-func (e *etcdsrv) List(key string, filters ...func(client.Node) bool) ([]string, error) {
-	cli, err := getClient(e.cfg)
-	if err != nil {
-		return nil, errors.Wrap(err, "list: failed to get client")
-	}
-	k := path.Join(e.cfg.KeyPrefix, key)
-	nodes, err := list(cli, k)
-	if err != nil {
-		return nil, errors.Wrap(err, "List: could not get keys")
-	}
-	var out []string
-	for _, f := range filters {
-		nodes = filter(nodes, f)
-	}
-	for _, n := range nodes {
-		out = append(out, strings.TrimPrefix(n.Key, e.cfg.KeyPrefix))
-	}
-	return out, nil
+func (e *etcdsrv) prefix() string {
+	return e.cfg.KeyPrefix
 }
 
-// FilterPrefix is a filter to be used with List to return only paths that start with prefix. If specified,
-// cut will first trim a leading path off the string before comparison.
-func FilterPrefix(prefix string, cut string) func(client.Node) bool {
-	return func(n client.Node) bool {
-		return strings.HasPrefix(strings.TrimPrefix(n.Key, cut), prefix)
+// filter applies a filter function to a slice of KeyValue pairs
+func filter(kvs []*mvccpb.KeyValue, f func(*mvccpb.KeyValue) bool) []*mvccpb.KeyValue {
+	var out []*mvccpb.KeyValue
+	for _, kv := range kvs {
+		if f(kv) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// FilterPrefix returns a filter function that matches keys with the given prefix
+func FilterPrefix(prefix string, cut string) func(*mvccpb.KeyValue) bool {
+	return func(kv *mvccpb.KeyValue) bool {
+		return strings.HasPrefix(strings.TrimPrefix(string(kv.Key), cut), prefix)
 	}
 }
 
-// FilterRemoveDirectories is a filter to be used with List to remove all directories (i.e., nodes that contain only other nodes and no value)
-func FilterRemoveDirectories() func(client.Node) bool {
-	return func(n client.Node) bool {
-		return !n.Dir
+// FilterRemoveDirectories returns a filter function that removes directory entries
+// A key is considered a directory if it has no value
+func FilterRemoveDirectories() func(*mvccpb.KeyValue) bool {
+	return func(kv *mvccpb.KeyValue) bool {
+		return len(kv.Value) > 0
 	}
 }
 
-// FilterExactPrefix returns only terminal nodes (files) with the exact path prefix.  For example, for two files
-// `/one/two/file.txt` and `/one/two/three/file.txt` only the first would be returned for a prefix of `/one/two`.
-func FilterExactPrefix(prefix string, cut string) func(client.Node) bool {
-	return func(n client.Node) bool {
-		s := strings.TrimPrefix(n.Key, cut)
-		if n.Dir {
-			return false
+// FilterExactPrefix returns a filter function that matches only terminal nodes (files)
+// with the exact path prefix
+func FilterExactPrefix(prefix string, cut string) func(*mvccpb.KeyValue) bool {
+	return func(kv *mvccpb.KeyValue) bool {
+		s := strings.TrimPrefix(string(kv.Key), cut)
+		if len(kv.Value) == 0 {
+			return false // Directory
 		}
 		dir, _ := path.Split(s)
 		if dir == prefix || dir == prefix+"/" {
@@ -343,23 +484,4 @@ func FilterExactPrefix(prefix string, cut string) func(client.Node) bool {
 		}
 		return false
 	}
-}
-
-// filter is a helper function to apply filters to the nodes returned from List
-func filter(nodes []client.Node, f func(client.Node) bool) []client.Node {
-	var out []client.Node
-	for _, n := range nodes {
-		switch f(n) {
-		case true:
-			out = append(out, n)
-			continue
-		default:
-			continue
-		}
-	}
-	return out
-}
-
-func (e *etcdsrv) prefix() string {
-	return e.cfg.KeyPrefix
 }
