@@ -14,44 +14,44 @@ func init() {
 //
 //	storage etcd {
 //	    prefix <key_prefix>
-//	    endpoints <endpoint1> [<endpoint2>...]
+//	    endpoints {
+//	        <endpoint1>
+//	        <endpoint2>
+//	        ...
+//	    }
 //	    timeout <duration>
 //	    caddyfile <path>
 //	    disable_caddyfile_load
-//	}
-//
-// JSON configuration example:
-//
-//	{
-//	    "storage": {
-//	        "module": "etcd",
-//	        "key_prefix": "/caddy",
-//	        "endpoints": ["http://localhost:2379"],
-//	        "lock_timeout": "5m",
-//	        "tls": {
-//	            "cert_file": "/path/to/cert.pem",
-//	            "key_file": "/path/to/key.pem",
-//	            "ca_file": "/path/to/ca.pem",
-//	            "server_name": "etcd.example.com",
-//	            "skip_verify": false
-//	        },
-//	        "auth": {
-//	            "username": "user",
-//	            "password": "pass"
-//	        },
-//	        "connection": {
-//	            "dial_timeout": "5s",
-//	            "keepalive_time": "30s",
-//	            "keepalive_timeout": "10s",
-//	            "auto_sync_interval": "5m",
-//	            "request_timeout": "10s",
-//	            "reject_old_cluster": true
-//	        }
+//	    auth {
+//	        username <username>
+//	        password <password>
+//	    }
+//	    tls {
+//	        cert <path>
+//	        key <path>
+//	        ca <path>
+//	        server_name <name>
+//	        insecure_skip_verify
+//	    }
+//	    connection {
+//	        dial_timeout <duration>
+//	        keepalive_time <duration>
+//	        keepalive_timeout <duration>
+//	        auto_sync_interval <duration>
+//	        request_timeout <duration>
+//	        reject_old_cluster <bool>
 //	    }
 //	}
 func (c *Cluster) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	d.Next() // skip storage token
-	d.Next() // skip etcd token
+	// First token should be present
+	if !d.Next() {
+		return d.ArgErr()
+	}
+
+	// No additional arguments expected on the same line as 'storage etcd'
+	if d.NextArg() {
+		return d.ArgErr()
+	}
 
 	// Initialize config with defaults
 	cfg, err := NewClusterConfig()
@@ -60,8 +60,11 @@ func (c *Cluster) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	}
 	c.cfg = cfg
 
-	for d.NextBlock(0) {
-		switch d.Val() {
+	// Process the configuration block
+	for nesting := d.Nesting(); d.NextBlock(nesting); {
+		configKey := d.Val()
+
+		switch configKey {
 		case "prefix":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -71,12 +74,12 @@ func (c *Cluster) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 
 		case "endpoints":
-			if !d.NextArg() {
-				return d.ArgErr()
+			var endpoints []string
+			for nesting := d.Nesting(); d.NextBlock(nesting); {
+				endpoints = append(endpoints, d.Val())
 			}
-			endpoints := d.RemainingArgs()
 			if len(endpoints) == 0 {
-				endpoints = []string{d.Val()}
+				return d.Errf("no endpoints specified")
 			}
 			if err := WithServers(strings.Join(endpoints, ","))(c.cfg); err != nil {
 				return err
@@ -104,23 +107,29 @@ func (c *Cluster) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 
 		case "auth":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			username := d.Val()
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			password := d.Val()
-			if err := WithUsername(username)(c.cfg); err != nil {
-				return err
-			}
-			if err := WithPassword(password)(c.cfg); err != nil {
-				return err
+			for nesting := d.Nesting(); d.NextBlock(nesting); {
+				switch d.Val() {
+				case "username":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					if err := WithUsername(d.Val())(c.cfg); err != nil {
+						return err
+					}
+				case "password":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					if err := WithPassword(d.Val())(c.cfg); err != nil {
+						return err
+					}
+				default:
+					return d.Errf("unknown auth option: %s", d.Val())
+				}
 			}
 
 		case "tls":
-			for d.NextBlock(1) {
+			for nesting := d.Nesting(); d.NextBlock(nesting); {
 				switch d.Val() {
 				case "cert":
 					if !d.NextArg() {
@@ -155,14 +164,63 @@ func (c *Cluster) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 						return err
 					}
 				default:
-					return d.Errf("unknown tls option %s", d.Val())
+					return d.Errf("unknown tls option: %s", d.Val())
+				}
+			}
+
+		case "connection":
+			for nesting := d.Nesting(); d.NextBlock(nesting); {
+				switch d.Val() {
+				case "dial_timeout":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					if err := WithDialTimeout(d.Val())(c.cfg); err != nil {
+						return err
+					}
+				case "keepalive_time":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					if err := WithKeepAliveTime(d.Val())(c.cfg); err != nil {
+						return err
+					}
+				case "keepalive_timeout":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					if err := WithKeepAliveTimeout(d.Val())(c.cfg); err != nil {
+						return err
+					}
+				case "auto_sync_interval":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					if err := WithAutoSyncInterval(d.Val())(c.cfg); err != nil {
+						return err
+					}
+				case "request_timeout":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					if err := WithRequestTimeout(d.Val())(c.cfg); err != nil {
+						return err
+					}
+				case "reject_old_cluster":
+					if !d.NextArg() {
+						return d.ArgErr()
+					}
+					if err := WithRejectOldCluster(d.Val())(c.cfg); err != nil {
+						return err
+					}
+				default:
+					return d.Errf("unknown connection option: %s", d.Val())
 				}
 			}
 
 		default:
-			return d.Errf("unknown subdirective %s", d.Val())
+			return d.Errf("unknown directive: %s", configKey)
 		}
 	}
-
 	return nil
 }
