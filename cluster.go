@@ -15,10 +15,6 @@ import (
 	"strings"
 )
 
-func init() {
-	caddy.RegisterModule(Cluster{})
-}
-
 // logger provides structured logging using Caddy's logger
 var logger *zap.Logger
 

@@ -1,9 +1,14 @@
 package etcd
 
 import (
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"strings"
 )
+
+func init() {
+	caddy.RegisterModule(Cluster{})
+}
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler. Syntax:
 //
