@@ -17,15 +17,23 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-// testHelper provides common test infrastructure
+// testHelper provides common test infrastructure for etcd integration testing.
+// It manages test lifecycle including:
+// - Setting up test etcd connections
+// - Creating temporary directories and files
+// - Cleaning up resources after tests
+// - Generating test certificates for TLS testing
 type testHelper struct {
-	t      *testing.T
-	client *clientv3.Client
-	cfg    *ClusterConfig
-	tmpDir string
+	t      *testing.T        // Testing context
+	client *clientv3.Client  // etcd client connection
+	cfg    *ClusterConfig    // Test configuration
+	tmpDir string            // Temporary directory for test files
 }
 
 // newTestHelper creates a new test helper with an etcd client
+// newTestHelper creates a new test helper with an etcd client connection.
+// It skips the test if etcd is not available.
+// The caller must call cleanup() when done to release resources.
 func newTestHelper(t *testing.T) *testHelper {
 	cfg := &ClusterConfig{
 		KeyPrefix: fmt.Sprintf("/caddy-test-%d", time.Now().UnixNano()),
@@ -66,6 +74,11 @@ func newTestHelper(t *testing.T) *testHelper {
 }
 
 // cleanup removes test data and closes connections
+// cleanup removes test data from etcd and cleans up resources.
+// This includes:
+// - Deleting test keys from etcd
+// - Closing the client connection
+// - Removing temporary directories
 func (h *testHelper) cleanup() {
 	if h == nil || h.client == nil {
 		return
@@ -85,7 +98,21 @@ func (h *testHelper) cleanup() {
 	}
 }
 
-// generateTestCerts creates test certificates for TLS testing
+// generateTestCerts creates temporary TLS certificates for testing.
+// It generates a complete certificate chain including:
+// - A self-signed CA certificate with RSA 2048-bit key
+// - A client certificate signed by the CA with RSA 2048-bit key
+// - All corresponding private keys
+//
+// The certificates are written to temporary files that are cleaned up
+// when the test completes.
+//
+// Returns:
+//   - certFile: Path to the client certificate PEM file
+//   - keyFile: Path to the client private key PEM file
+//   - caFile: Path to the CA certificate PEM file
+//
+// The caller must ensure cleanup() is called to remove the temporary files.
 func (h *testHelper) generateTestCerts() (certFile, keyFile, caFile string) {
 	// Generate CA cert
 	ca := &x509.Certificate{

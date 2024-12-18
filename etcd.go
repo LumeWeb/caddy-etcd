@@ -458,6 +458,14 @@ func (e *etcdsrv) prefix() string {
 }
 
 // filter applies a filter function to a slice of KeyValue pairs
+// filter applies a filter function to a slice of KeyValue pairs.
+// It returns a new slice containing only the elements that pass the filter.
+//
+// Parameters:
+//   - kvs: Slice of KeyValue pairs to filter
+//   - f: Filter function that returns true for elements to keep
+//
+// Returns a new slice containing only the KeyValue pairs that passed the filter
 func filter(kvs []*mvccpb.KeyValue, f func(*mvccpb.KeyValue) bool) []*mvccpb.KeyValue {
 	var out []*mvccpb.KeyValue
 	for _, kv := range kvs {
@@ -469,6 +477,14 @@ func filter(kvs []*mvccpb.KeyValue, f func(*mvccpb.KeyValue) bool) []*mvccpb.Key
 }
 
 // FilterPrefix returns a filter function that matches keys with the given prefix
+// FilterPrefix returns a filter function that matches keys with the given prefix.
+// It trims the base prefix (cut) from each key before checking the match prefix.
+//
+// Parameters:
+//   - prefix: The prefix to match against after trimming the base prefix
+//   - cut: The base prefix to remove before matching (e.g. /caddy)
+//
+// Returns a filter function that can be used with List() to filter by key prefix
 func FilterPrefix(prefix string, cut string) func(*mvccpb.KeyValue) bool {
 	return func(kv *mvccpb.KeyValue) bool {
 		return strings.HasPrefix(strings.TrimPrefix(string(kv.Key), cut), prefix)
@@ -477,6 +493,11 @@ func FilterPrefix(prefix string, cut string) func(*mvccpb.KeyValue) bool {
 
 // FilterRemoveDirectories returns a filter function that removes directory entries
 // A key is considered a directory if it has no value
+// FilterRemoveDirectories returns a filter function that removes directory entries.
+// A key is considered a directory if it has no value stored in etcd.
+// This is useful for getting only leaf nodes (files) in a directory structure.
+//
+// Returns a filter function that can be used with List() to exclude directories
 func FilterRemoveDirectories() func(*mvccpb.KeyValue) bool {
 	return func(kv *mvccpb.KeyValue) bool {
 		return len(kv.Value) > 0
@@ -485,6 +506,16 @@ func FilterRemoveDirectories() func(*mvccpb.KeyValue) bool {
 
 // FilterExactPrefix returns a filter function that matches only terminal nodes (files)
 // with the exact path prefix
+// FilterExactPrefix returns a filter function that matches only terminal nodes (files)
+// with the exact path prefix. It trims the base prefix (cut) before matching.
+//
+// Parameters:
+//   - prefix: The exact prefix to match after trimming (e.g. /path/to/dir)
+//   - cut: The base prefix to remove before matching (e.g. /caddy)
+//
+// Returns a filter function that matches only files directly under the given prefix,
+// not in subdirectories. For example, with prefix "/foo", it matches "/foo/file.txt"
+// but not "/foo/bar/file.txt"
 func FilterExactPrefix(prefix string, cut string) func(*mvccpb.KeyValue) bool {
 	return func(kv *mvccpb.KeyValue) bool {
 		s := strings.TrimPrefix(string(kv.Key), cut)

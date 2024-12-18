@@ -23,6 +23,8 @@ func (e NotExist) Error() string {
 }
 
 // IsNotExistError checks to see if error is of type NotExist
+// IsNotExistError checks if the given error indicates a key does not exist.
+// Returns true if the error is of type NotExist, false otherwise.
 func IsNotExistError(e error) bool {
 	switch e.(type) {
 	case NotExist:
@@ -43,6 +45,8 @@ func (e FailedChecksum) Error() string {
 }
 
 // IsFailedChecksumError checks to see if error is of type FailedChecksum
+// IsFailedChecksumError checks if the given error indicates a checksum validation failure.
+// Returns true if the error is of type FailedChecksum, false otherwise.
 func IsFailedChecksumError(e error) bool {
 	switch e.(type) {
 	case FailedChecksum:
@@ -71,6 +75,8 @@ func (e LockError) Unwrap() error {
 }
 
 // IsLockError checks if the error is a LockError
+// IsLockError checks if the given error is related to lock acquisition failure.
+// Returns true if the error is of type LockError, false otherwise.
 func IsLockError(e error) bool {
 	_, ok := e.(LockError)
 	return ok
@@ -91,6 +97,8 @@ func (e ConnectionError) Unwrap() error {
 }
 
 // IsConnectionError checks if the error is a ConnectionError
+// IsConnectionError checks if the given error is related to etcd connection issues.
+// Returns true if the error is of type ConnectionError, false otherwise.
 func IsConnectionError(e error) bool {
 	_, ok := e.(ConnectionError)
 	return ok

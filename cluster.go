@@ -1,4 +1,6 @@
-// Package etcd implements a distributed storage backend for Caddy using etcd
+// Package etcd implements a distributed storage backend for Caddy using etcd.
+// It provides cluster-wide synchronization of TLS certificates and other Caddy assets
+// using etcd as the distributed storage layer.
 package etcd
 
 import (
@@ -29,10 +31,12 @@ var (
 	_ caddy.Validator        = (*Cluster)(nil)
 )
 
-// Cluster implements certmagic.Storage using etcd as the storage backend
+// Cluster implements certmagic.Storage using etcd as the storage backend.
+// It provides distributed locking, atomic operations, and consistent storage
+// across multiple Caddy instances in a cluster.
 type Cluster struct {
-	srv Service
-	cfg *ClusterConfig
+	srv Service       // The etcd service interface
+	cfg *ClusterConfig // Configuration for etcd connection and behavior
 }
 
 // CaddyModule returns the Caddy module information.

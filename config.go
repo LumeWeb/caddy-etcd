@@ -14,6 +14,7 @@ import (
 	"github.com/pkg/errors"
 )
 
+// Duration wraps time.Duration to provide JSON marshaling/unmarshaling
 type Duration struct {
 	time.Duration
 }
@@ -36,14 +37,15 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// ConnectionConfig holds etcd connection settings
+// ConnectionConfig holds etcd connection settings including timeouts,
+// keepalive parameters, and other connection-related configuration options.
 type ConnectionConfig struct {
-	DialTimeout      Duration `json:"dial_timeout,string,omitempty"`
-	KeepAliveTime    Duration `json:"keepalive_time,string,omitempty"`
-	KeepAliveTimeout Duration `json:"keepalive_timeout,string,omitempty"`
-	AutoSyncInterval Duration `json:"auto_sync_interval,string,omitempty"`
-	RequestTimeout   Duration `json:"request_timeout,string,omitempty"`
-	RejectOldCluster bool     `json:"reject_old_cluster,omitempty"`
+	DialTimeout      Duration `json:"dial_timeout,string,omitempty"`      // Timeout for establishing initial connection
+	KeepAliveTime    Duration `json:"keepalive_time,string,omitempty"`    // Time between keepalive probes
+	KeepAliveTimeout Duration `json:"keepalive_timeout,string,omitempty"` // Time to wait for keepalive response
+	AutoSyncInterval Duration `json:"auto_sync_interval,string,omitempty"` // Interval for endpoint auto-synchronization
+	RequestTimeout   Duration `json:"request_timeout,string,omitempty"`   // Timeout for individual requests
+	RejectOldCluster bool     `json:"reject_old_cluster,omitempty"`      // Whether to reject connecting to old clusters
 }
 
 // ClusterConfig maintains configuration for connecting to and interacting with etcd.
@@ -53,18 +55,21 @@ type ConnectionConfig struct {
 //   - Connection timeouts and keepalive settings
 //   - Lock timeouts and operational parameters
 //   - Optional Caddyfile loading configuration
+// TLSConfig holds TLS-related configuration for secure etcd connections.
+// It includes paths to certificates and keys, as well as verification options.
 type TLSConfig struct {
-	CertFile   string `json:"cert_file,omitempty"`
-	KeyFile    string `json:"key_file,omitempty"`
-	CAFile     string `json:"ca_file,omitempty"`
-	ServerName string `json:"server_name,omitempty"`
-	SkipVerify bool   `json:"skip_verify,omitempty"`
+	CertFile   string `json:"cert_file,omitempty"`   // Path to client certificate file
+	KeyFile    string `json:"key_file,omitempty"`    // Path to client key file
+	CAFile     string `json:"ca_file,omitempty"`     // Path to CA certificate for server verification
+	ServerName string `json:"server_name,omitempty"` // Expected server name for verification
+	SkipVerify bool   `json:"skip_verify,omitempty"` // Whether to skip TLS verification (not recommended)
 }
 
-// AuthConfig holds authentication credentials
+// AuthConfig holds authentication credentials for etcd access.
+// Both username and password must be provided together if authentication is enabled.
 type AuthConfig struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
+	Username string `json:"username,omitempty"` // Username for etcd authentication
+	Password string `json:"password,omitempty"` // Password for etcd authentication
 }
 
 type ClusterConfig struct {
@@ -162,7 +167,15 @@ func WithRejectOldCluster(s string) ConfigOption {
 	}
 }
 
-// validateEnvPairs checks that environment variables that must be set together are present
+// validateEnvPairs checks that environment variables that must be set together are present.
+// It enforces rules like:
+// - TLS cert and key files must both be provided or neither
+// - Username and password must both be provided for authentication
+//
+// Parameters:
+//   - vars: Map of environment variable names to their values
+//
+// Returns an error if any required pairs are not properly set
 func validateEnvPairs(vars map[string]string) error {
 	// Check TLS cert/key pair
 	hasCert := vars["CADDY_CLUSTERING_ETCD_TLS_CERT"] != ""
@@ -246,7 +259,16 @@ func WithTLSSkipVerify(s string) ConfigOption {
 	}
 }
 
-// validateFileExists checks if a file exists and is readable
+// validateFileExists checks if a file exists and is readable.
+// It verifies that:
+// - The file exists on disk
+// - It is not a directory
+// - The process has read permissions
+//
+// Parameters:
+//   - path: Full path to the file to check
+//
+// Returns an error if any validation fails
 func validateFileExists(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -267,7 +289,16 @@ func validateFileExists(path string) error {
 	return nil
 }
 
-// validateServerURL checks if a server URL is valid
+// validateServerURL checks if a server URL is valid.
+// It verifies that:
+// - The URL has a valid format
+// - The scheme is either http or https
+// - A host is specified
+//
+// Parameters:
+//   - server: URL string to validate
+//
+// Returns an error if the URL is invalid
 func validateServerURL(server string) error {
 	u, err := url.Parse(server)
 	if err != nil {
@@ -282,7 +313,15 @@ func validateServerURL(server string) error {
 	return nil
 }
 
-// validateTimeout checks if a timeout string is valid
+// validateTimeout checks if a timeout string is valid.
+// It verifies that:
+// - The duration string can be parsed
+// - The duration is at least 1 second
+//
+// Parameters:
+//   - timeout: Duration string to validate (e.g. "5s", "1m")
+//
+// Returns an error if the timeout is invalid
 func validateTimeout(timeout string) error {
 	d, err := time.ParseDuration(timeout)
 	if err != nil {

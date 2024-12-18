@@ -18,6 +18,16 @@ import (
 	"time"
 )
 
+// pipeline executes a series of operations with rollback support.
+// It runs each commit operation in sequence, and if any fails, it executes
+// the corresponding rollback operations in reverse order.
+//
+// Parameters:
+//   - commits: Slice of operations to execute
+//   - rollbacks: Slice of operations to run on failure (in reverse order)
+//   - b: Backoff configuration for retrying operations
+//
+// Returns an error if any operation fails, including rollback errors
 func pipeline(commits []backoff.Operation, rollbacks []backoff.Operation, b backoff.BackOff) error {
 	var err error
 	for idx, commit := range commits {
@@ -39,6 +49,13 @@ func pipeline(commits []backoff.Operation, rollbacks []backoff.Operation, b back
 	return err
 }
 
+// getClient creates and validates an etcd client connection.
+// It handles TLS configuration, authentication, and connection verification.
+//
+// Parameters:
+//   - c: Cluster configuration including endpoints, TLS, auth settings
+//
+// Returns a connected client and any connection errors
 func getClient(c *ClusterConfig) (*clientv3.Client, error) {
 	// Initialize logger if not already set
 	if logger == nil {
@@ -108,6 +125,14 @@ func getClient(c *ClusterConfig) (*clientv3.Client, error) {
 }
 
 // createTLSConfig creates a TLS configuration for etcd client
+// createTLSConfig builds a TLS configuration for secure etcd connections.
+// It loads certificates and keys, configures the root CA pool,
+// and applies verification settings.
+//
+// Parameters:
+//   - c: Cluster configuration containing TLS settings
+//
+// Returns the TLS configuration or any errors loading certificates
 func createTLSConfig(c *ClusterConfig) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
 		ServerName:         c.TLS.ServerName,
@@ -137,10 +162,29 @@ func createTLSConfig(c *ClusterConfig) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+// tx is a helper function that creates a transaction from multiple operations.
+// It simply wraps the operations in a slice for use with pipeline().
+// tx creates a transaction from multiple operations.
+// It combines multiple operations into a single slice for atomic execution.
+//
+// Parameters:
+//   - txs: Variable number of operations to combine
+//
+// Returns a slice of operations that can be executed atomically
 func tx(txs ...backoff.Operation) []backoff.Operation {
 	return txs
 }
 
+// get creates an operation that retrieves a value from etcd.
+// The value is expected to be base64 encoded in etcd and will be decoded
+// before being written to the destination buffer.
+//
+// Parameters:
+//   - cli: etcd client
+//   - key: Key to retrieve
+//   - dst: Buffer to write the decoded value to
+//
+// Returns an operation that can be used with pipeline()
 func get(cli *clientv3.Client, key string, dst *bytes.Buffer) backoff.Operation {
 	return func() error {
 		resp, err := cli.Get(context.Background(), key)
@@ -164,6 +208,15 @@ func get(cli *clientv3.Client, key string, dst *bytes.Buffer) backoff.Operation 
 	}
 }
 
+// set creates an operation that stores a value in etcd.
+// The value is base64 encoded before being stored.
+//
+// Parameters:
+//   - cli: etcd client
+//   - key: Key to store the value under
+//   - value: Raw bytes to store
+//
+// Returns an operation that can be used with pipeline()
 func set(cli *clientv3.Client, key string, value []byte) backoff.Operation {
 	return func() error {
 		encodedValue := base64.StdEncoding.EncodeToString(value)
@@ -175,6 +228,13 @@ func set(cli *clientv3.Client, key string, value []byte) backoff.Operation {
 	}
 }
 
+// del creates an operation that deletes a key from etcd.
+//
+// Parameters:
+//   - cli: etcd client
+//   - key: Key to delete
+//
+// Returns an operation that can be used with pipeline()
 func del(cli *clientv3.Client, key string) backoff.Operation {
 	return func() error {
 		_, err := cli.Delete(context.Background(), key)
@@ -185,6 +245,15 @@ func del(cli *clientv3.Client, key string) backoff.Operation {
 	}
 }
 
+// setMD creates an operation that stores metadata in etcd.
+// The metadata is JSON marshaled and base64 encoded before storage.
+//
+// Parameters:
+//   - cli: etcd client
+//   - key: Key to store the metadata under
+//   - m: Metadata to store
+//
+// Returns an operation that can be used with pipeline()
 func setMD(cli *clientv3.Client, key string, m Metadata) backoff.Operation {
 	return func() error {
 		jsdata, err := json.Marshal(m)
@@ -199,6 +268,16 @@ func setMD(cli *clientv3.Client, key string, m Metadata) backoff.Operation {
 	}
 }
 
+// getMD creates an operation that retrieves metadata from etcd.
+// It handles both direct file metadata and directory metadata aggregation.
+// For directories, it aggregates size and finds the latest timestamp from children.
+//
+// Parameters:
+//   - cli: etcd client
+//   - key: Key to retrieve metadata for
+//   - m: Pointer to metadata struct to populate
+//
+// Returns an operation that can be used with pipeline()
 func getMD(cli *clientv3.Client, key string, m *Metadata) backoff.Operation {
 	return func() error {
 		// Try direct file lookup first
@@ -250,6 +329,14 @@ func getMD(cli *clientv3.Client, key string, m *Metadata) backoff.Operation {
 	}
 }
 
+// unmarshalMDv3 decodes and unmarshals metadata from its etcd storage format.
+// The metadata is expected to be base64 encoded JSON.
+//
+// Parameters:
+//   - value: Raw bytes from etcd
+//   - m: Pointer to metadata struct to populate
+//
+// Returns an error if decoding or unmarshaling fails
 func unmarshalMDv3(value []byte, m *Metadata) error {
 	if m == nil {
 		return errors.New("unmarshalMD: metadata is nil")
@@ -264,12 +351,36 @@ func unmarshalMDv3(value []byte, m *Metadata) error {
 	return nil
 }
 
+// noop creates an operation that does nothing.
+// Useful as a placeholder in transaction rollbacks.
+// noop creates an operation that does nothing.
+// Useful as a placeholder in transaction rollbacks or when an operation
+// needs to be skipped but the transaction structure must be maintained.
+//
+// Returns an operation that always succeeds without doing anything
 func noop() backoff.Operation {
 	return func() error {
 		return nil
 	}
 }
 
+// exists creates an operation that checks if a key exists in etcd.
+//
+// Parameters:
+//   - cli: etcd client
+//   - key: Key to check
+//   - out: Pointer to bool that will be set to true if key exists
+//
+// Returns an operation that can be used with pipeline()
+// exists creates an operation that checks if a key exists in etcd.
+// It sets the output bool to true if the key exists, false otherwise.
+//
+// Parameters:
+//   - cli: etcd client connection
+//   - key: Key to check for existence
+//   - out: Pointer to bool that will be set based on key existence
+//
+// Returns an operation that can be used with pipeline()
 func exists(cli *clientv3.Client, key string, out *bool) backoff.Operation {
 	return func() error {
 		resp, err := cli.Get(context.Background(), key)
@@ -281,6 +392,24 @@ func exists(cli *clientv3.Client, key string, out *bool) backoff.Operation {
 	}
 }
 
+// list retrieves all keys under a prefix from etcd.
+// It returns the raw KeyValue pairs which can then be filtered using
+// the Filter* functions.
+//
+// Parameters:
+//   - cli: etcd client
+//   - key: Prefix to list under
+//
+// Returns the KeyValue pairs and any error that occurred
+// list retrieves all keys under a prefix from etcd.
+// It returns the raw KeyValue pairs which can then be filtered using
+// the Filter* functions.
+//
+// Parameters:
+//   - cli: etcd client connection
+//   - key: Prefix to list under
+//
+// Returns the KeyValue pairs and any error that occurred
 func list(cli *clientv3.Client, key string) ([]*mvccpb.KeyValue, error) {
 	resp, err := cli.Get(context.Background(), key, clientv3.WithPrefix())
 	if err != nil {
