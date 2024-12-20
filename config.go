@@ -40,12 +40,12 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 // ConnectionConfig holds etcd connection settings including timeouts,
 // keepalive parameters, and other connection-related configuration options.
 type ConnectionConfig struct {
-	DialTimeout      Duration `json:"dial_timeout,string,omitempty"`      // Timeout for establishing initial connection
-	KeepAliveTime    Duration `json:"keepalive_time,string,omitempty"`    // Time between keepalive probes
-	KeepAliveTimeout Duration `json:"keepalive_timeout,string,omitempty"` // Time to wait for keepalive response
+	DialTimeout      Duration `json:"dial_timeout,string,omitempty"`       // Timeout for establishing initial connection
+	KeepAliveTime    Duration `json:"keepalive_time,string,omitempty"`     // Time between keepalive probes
+	KeepAliveTimeout Duration `json:"keepalive_timeout,string,omitempty"`  // Time to wait for keepalive response
 	AutoSyncInterval Duration `json:"auto_sync_interval,string,omitempty"` // Interval for endpoint auto-synchronization
-	RequestTimeout   Duration `json:"request_timeout,string,omitempty"`   // Timeout for individual requests
-	RejectOldCluster bool     `json:"reject_old_cluster,omitempty"`      // Whether to reject connecting to old clusters
+	RequestTimeout   Duration `json:"request_timeout,string,omitempty"`    // Timeout for individual requests
+	RejectOldCluster bool     `json:"reject_old_cluster,omitempty"`        // Whether to reject connecting to old clusters
 }
 
 // ClusterConfig maintains configuration for connecting to and interacting with etcd.
@@ -55,6 +55,7 @@ type ConnectionConfig struct {
 //   - Connection timeouts and keepalive settings
 //   - Lock timeouts and operational parameters
 //   - Optional Caddyfile loading configuration
+//
 // TLSConfig holds TLS-related configuration for secure etcd connections.
 // It includes paths to certificates and keys, as well as verification options.
 type TLSConfig struct {
@@ -357,7 +358,9 @@ func NewClusterConfig(opts ...ConfigOption) (*ClusterConfig, error) {
 		}
 	}
 	if len(c.ServerIP) == 0 {
-		c.ServerIP = []string{"http://127.0.0.1:2379"}
+		defaultServerIP := "http://127.0.0.1:2379"
+		c.ServerIP = []string{defaultServerIP}
+		fmt.Printf("No endpoints provided, defaulting to %s\n", defaultServerIP)
 	}
 
 	// Validate the configuration
