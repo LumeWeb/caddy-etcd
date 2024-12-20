@@ -464,6 +464,7 @@ func ConfigOptsFromEnvironment() ([]ConfigOption, error) {
 // (i.e., http://127.0.0.1:2379)  The default config uses port 2379 on localhost.
 func WithServers(s string) ConfigOption {
 	return func(c *ClusterConfig) error {
+		c.ServerIP = nil
 		var srvs []string
 		switch {
 		case strings.Index(s, ";") >= 0:
