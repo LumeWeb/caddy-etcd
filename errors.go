@@ -2,13 +2,14 @@ package etcd
 
 import (
 	"fmt"
+	"io/fs"
 	"time"
 )
 
 // Error types for specific failure cases
 var (
 	ErrLockTimeout   = fmt.Errorf("lock timeout exceeded")
-	ErrNoConnection  = fmt.Errorf("etcd cluster is not available") 
+	ErrNoConnection  = fmt.Errorf("etcd cluster is not available")
 	ErrClusterDown   = fmt.Errorf("etcd cluster is not available")
 	ErrInvalidConfig = fmt.Errorf("invalid configuration")
 )
@@ -20,6 +21,10 @@ type NotExist struct {
 
 func (e NotExist) Error() string {
 	return fmt.Sprintf("key %s does not exist", e.Key)
+}
+
+func (e NotExist) Is(target error) bool {
+	return target == fs.ErrNotExist
 }
 
 // IsNotExistError checks to see if error is of type NotExist

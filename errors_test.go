@@ -1,6 +1,8 @@
 package etcd
 
 import (
+	"io"
+	"io/fs"
 	"testing"
 	"time"
 
@@ -45,7 +47,7 @@ func TestErrors(t *testing.T) {
 		baseErr := ErrClusterDown
 		e := ConnectionError{
 			Endpoints: endpoints,
-			Err:      baseErr,
+			Err:       baseErr,
 		}
 
 		assert.True(t, IsConnectionError(e))
@@ -64,11 +66,24 @@ func TestErrors(t *testing.T) {
 		baseErr := errors.New("original error")
 		connErr := ConnectionError{
 			Endpoints: []string{"http://localhost:2379"},
-			Err:      baseErr,
+			Err:       baseErr,
 		}
 
 		var target ConnectionError
 		assert.True(t, errors.As(connErr, &target))
 		assert.Equal(t, baseErr, errors.Unwrap(connErr))
 	})
+}
+func TestNotExistError(t *testing.T) {
+	err := NotExist{Key: "test/key"}
+
+	// Should match fs.ErrNotExist
+	assert.True(t, errors.Is(err, fs.ErrNotExist))
+
+	// Should not match other errors
+	assert.False(t, errors.Is(err, io.EOF))
+
+	// Error message should contain the key
+	assert.Contains(t, err.Error(), "test/key")
+	assert.Contains(t, err.Error(), "does not exist")
 }
