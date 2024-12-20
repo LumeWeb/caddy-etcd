@@ -17,6 +17,7 @@ import (
 
 // logger provides structured logging using Caddy's logger
 var logger *zap.Logger
+var cluster *Cluster
 
 // Interface guards
 var (
@@ -40,16 +41,20 @@ func (Cluster) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID: "caddy.storage.etcd",
 		New: func() caddy.Module {
-			opts, err := ConfigOptsFromEnvironment()
-			if err != nil {
-				log.Fatal("failed to get config from environment", err)
-			}
+			if cluster == nil {
+				opts, err := ConfigOptsFromEnvironment()
+				if err != nil {
+					log.Fatal("failed to get config from environment", err)
+				}
 
-			c, err := NewClusterConfig(opts...)
-			if err != nil {
-				log.Fatal("failed to create cluster config", err)
+				c, err := NewClusterConfig(opts...)
+				if err != nil {
+					log.Fatal("failed to create cluster config", err)
+				}
+
+				cluster = &Cluster{cfg: c}
 			}
-			return &Cluster{cfg: c}
+			return cluster
 		},
 	}
 }
