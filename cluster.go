@@ -58,21 +58,26 @@ func (Cluster) CaddyModule() caddy.ModuleInfo {
 func (c *Cluster) Provision(ctx caddy.Context) error {
 	logger = ctx.Logger()
 
-	opts, err := ConfigOptsFromEnvironment()
-	if err != nil {
-		logger.Error("failed to get config from environment",
-			zap.Error(err))
-		return err
+	// If no configuration exists yet, try environment
+	if c.cfg == nil {
+		opts, err := ConfigOptsFromEnvironment()
+		if err != nil {
+			logger.Error("failed to get config from environment",
+				zap.Error(err))
+			return err
+		}
+
+		cfg, err := NewClusterConfig(opts...)
+		if err != nil {
+			logger.Error("failed to create cluster config",
+				zap.Error(err))
+			return err
+		}
+		c.cfg = cfg
 	}
 
-	cfg, err := NewClusterConfig(opts...)
-	if err != nil {
-		logger.Error("failed to create cluster config",
-			zap.Error(err))
-		return err
-	}
-
-	srv, err := NewService(cfg)
+	// Create service using existing config
+	srv, err := NewService(c.cfg)
 	if err != nil {
 		logger.Error("failed to create etcd service",
 			zap.Error(err))
@@ -80,10 +85,9 @@ func (c *Cluster) Provision(ctx caddy.Context) error {
 	}
 
 	c.srv = srv
-	c.cfg = cfg
 	logger.Info("etcd storage backend provisioned",
-		zap.String("prefix", cfg.KeyPrefix),
-		zap.Strings("endpoints", cfg.ServerIP))
+		zap.String("prefix", c.cfg.KeyPrefix),
+		zap.Strings("endpoints", c.cfg.ServerIP))
 	return nil
 }
 
