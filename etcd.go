@@ -207,9 +207,9 @@ func (e *etcdsrv) execute(o backoff.Operation) error {
 		return o()
 	default:
 		b := backoff.NewExponentialBackOff()
-		b.MaxElapsedTime = 30 * time.Second
-		b.InitialInterval = 100 * time.Millisecond
-		b.MaxInterval = 5 * time.Second
+		b.MaxElapsedTime = 60 * time.Second
+		b.InitialInterval = 500 * time.Millisecond
+		b.MaxInterval = 10 * time.Second
 		return backoff.Retry(o, b)
 	}
 }
