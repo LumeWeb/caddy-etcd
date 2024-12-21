@@ -344,11 +344,11 @@ func NewClusterConfig(opts ...ConfigOption) (*ClusterConfig, error) {
 		KeyPrefix:   "/caddy",
 		LockTimeout: Duration{5 * time.Minute},
 		Connection: ConnectionConfig{
-			DialTimeout:      Duration{5 * time.Second},  // Wrap in Duration{}
-			KeepAliveTime:    Duration{30 * time.Second}, // Wrap in Duration{}
-			KeepAliveTimeout: Duration{10 * time.Second}, // Wrap in Duration{}
-			AutoSyncInterval: Duration{5 * time.Minute},  // Wrap in Duration{}
-			RequestTimeout:   Duration{10 * time.Second}, // Wrap in Duration{}
+			DialTimeout:      Duration{5 * time.Second},
+			KeepAliveTime:    Duration{30 * time.Second},
+			KeepAliveTimeout: Duration{20 * time.Second},
+			AutoSyncInterval: Duration{5 * time.Minute},
+			RequestTimeout:   Duration{30 * time.Second},
 			RejectOldCluster: true,
 		},
 	}
