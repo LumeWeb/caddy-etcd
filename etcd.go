@@ -121,7 +121,7 @@ func (e *etcdsrv) lock(tok string, key string) error {
 
 	acquire := func() error {
 		// Use a longer timeout for lock operations
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 		defer cancel()
 
 		resp, err := e.cli.Get(ctx, lockKey)
@@ -187,7 +187,7 @@ func (e *etcdsrv) lock(tok string, key string) error {
 
 // Unlock releases the lock for the given key
 func (e *etcdsrv) Unlock(key string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // Increased timeout for list operations
+	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
 	release := func() error {
@@ -215,61 +215,61 @@ func (e *etcdsrv) execute(o backoff.Operation) error {
 }
 
 func (e *etcdsrv) List(key string, filters ...func(*mvccpb.KeyValue) bool) ([]string, error) {
-    // Normalize the key to always start with /
-    if !strings.HasPrefix(key, "/") {
-        key = "/" + key
-    }
+	// Normalize the key to always start with /
+	if !strings.HasPrefix(key, "/") {
+		key = "/" + key
+	}
 
-    // Create the full search path including the etcd prefix
-    searchKey := path.Join(e.cfg.KeyPrefix, key)
+	// Create the full search path including the etcd prefix
+	searchKey := path.Join(e.cfg.KeyPrefix, key)
 
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
+	defer cancel()
 
-    // Get all keys with the prefix
-    resp, err := e.cli.Get(ctx, searchKey, clientv3.WithPrefix())
-    if err != nil {
-        return nil, errors.Wrap(err, "List: failed to get keys")
-    }
+	// Get all keys with the prefix
+	resp, err := e.cli.Get(ctx, searchKey, clientv3.WithPrefix())
+	if err != nil {
+		return nil, errors.Wrap(err, "List: failed to get keys")
+	}
 
-    var out []string
-    prefixLen := len(e.cfg.KeyPrefix)
+	var out []string
+	prefixLen := len(e.cfg.KeyPrefix)
 
-    // Process and filter the keys
-    for _, kv := range resp.Kvs {
-        if kv == nil || len(kv.Key) <= prefixLen {
-            continue
-        }
+	// Process and filter the keys
+	for _, kv := range resp.Kvs {
+		if kv == nil || len(kv.Key) <= prefixLen {
+			continue
+		}
 
-        // Get the key relative to the prefix
-        relativeKey := string(kv.Key)[prefixLen:]
+		// Get the key relative to the prefix
+		relativeKey := string(kv.Key)[prefixLen:]
 
-        // Skip metadata entries
-        if strings.Contains(relativeKey, "/md/") {
-            continue
-        }
+		// Skip metadata entries
+		if strings.Contains(relativeKey, "/md/") {
+			continue
+		}
 
-        // Apply all filters
-        skip := false
-        for _, filter := range filters {
-            if !filter(kv) {
-                skip = true
-                break
-            }
-        }
-        if skip {
-            continue
-        }
+		// Apply all filters
+		skip := false
+		for _, filter := range filters {
+			if !filter(kv) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
 
-        // Ensure the key starts with /
-        if !strings.HasPrefix(relativeKey, "/") {
-            relativeKey = "/" + relativeKey
-        }
+		// Ensure the key starts with /
+		if !strings.HasPrefix(relativeKey, "/") {
+			relativeKey = "/" + relativeKey
+		}
 
-        out = append(out, relativeKey)
-    }
+		out = append(out, relativeKey)
+	}
 
-    return out, nil
+	return out, nil
 }
 
 func (e *etcdsrv) Store(key string, value []byte) error {
@@ -277,7 +277,7 @@ func (e *etcdsrv) Store(key string, value []byte) error {
 	storageKeyMD := path.Join(e.mdPrefix, key)
 	md := NewMetadata(key, value)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Increased timeout for store operations
+	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
 	resp, err := e.cli.Get(ctx, storageKeyMD)
@@ -326,7 +326,7 @@ func (e *etcdsrv) Load(key string) ([]byte, error) {
 	storageKey := path.Join(e.cfg.KeyPrefix, key)
 	storageKeyMD := path.Join(e.mdPrefix, key)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Increased timeout
+	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration) // Increased timeout
 	defer cancel()
 
 	resp, err := e.cli.Get(ctx, storageKeyMD)
@@ -370,7 +370,7 @@ func (e *etcdsrv) Delete(key string) error {
 	storageKey := path.Join(e.cfg.KeyPrefix, key)
 	storageKeyMD := path.Join(e.mdPrefix, key)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
 	txn := e.cli.Txn(ctx)
@@ -393,7 +393,7 @@ func (e *etcdsrv) Delete(key string) error {
 func (e *etcdsrv) Metadata(key string) (*Metadata, error) {
 	storageKeyMD := path.Join(e.mdPrefix, key)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
 	// Try direct file lookup first
