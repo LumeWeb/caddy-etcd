@@ -3,6 +3,7 @@ package etcd
 import (
 	"encoding/json"
 	"fmt"
+	"go.uber.org/zap"
 	"io/ioutil"
 	"log"
 	"net/url"
@@ -341,6 +342,9 @@ type ConfigOption func(c *ClusterConfig) error
 // NewClusterConfig returns a new configuration with options passed as functional
 // options and validates the configuration
 func NewClusterConfig(opts ...ConfigOption) (*ClusterConfig, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	c := &ClusterConfig{
 		KeyPrefix:   "/caddy",
 		LockTimeout: Duration{5 * time.Minute},
@@ -365,6 +369,10 @@ func NewClusterConfig(opts ...ConfigOption) (*ClusterConfig, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
+
+	logger.Info("Initialized cluster config",
+		zap.String("prefix", c.KeyPrefix),
+		zap.Strings("endpoints", c.ServerIP))
 
 	return c, nil
 }

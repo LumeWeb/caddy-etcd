@@ -62,6 +62,9 @@ func getClient(c *ClusterConfig) (*clientv3.Client, error) {
 		logger = zap.NewNop()
 	}
 
+	logger.Info("Initializing etcd client",
+		zap.Strings("endpoints", c.ServerIP))
+
 	cfg := clientv3.Config{
 		Endpoints:            c.ServerIP,
 		DialTimeout:          c.Connection.DialTimeout.Duration,
@@ -75,6 +78,8 @@ func getClient(c *ClusterConfig) (*clientv3.Client, error) {
 	if c.TLS.CertFile != "" {
 		tlsConfig, err := createTLSConfig(c)
 		if err != nil {
+			logger.Warn("Failed to create TLS config",
+				zap.Error(err))
 			return nil, errors.Wrap(err, "failed to create TLS config")
 		}
 		cfg.TLS = tlsConfig
@@ -88,7 +93,7 @@ func getClient(c *ClusterConfig) (*clientv3.Client, error) {
 
 	cli, err := clientv3.New(cfg)
 	if err != nil {
-		logger.Error("failed to create etcd client",
+		logger.Warn("Failed to create etcd client",
 			zap.Strings("endpoints", c.ServerIP),
 			zap.Error(err))
 		if strings.Contains(err.Error(), "context deadline exceeded") {
@@ -107,9 +112,10 @@ func getClient(c *ClusterConfig) (*clientv3.Client, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Connection.DialTimeout.Duration)
 	defer cancel()
 
+	start := time.Now()
 	if _, err := cli.Get(ctx, "ping"); err != nil {
 		cli.Close()
-		logger.Error("failed to verify etcd connection",
+		logger.Warn("Failed to verify etcd connection",
 			zap.Strings("endpoints", c.ServerIP),
 			zap.Error(err))
 		return nil, ConnectionError{
@@ -118,9 +124,9 @@ func getClient(c *ClusterConfig) (*clientv3.Client, error) {
 		}
 	}
 
-	logger.Debug("connected to etcd cluster",
-		zap.Strings("endpoints", c.ServerIP))
-
+	logger.Info("Connected to etcd cluster",
+		zap.Strings("endpoints", c.ServerIP),
+		zap.Duration("duration", time.Since(start)))
 	return cli, nil
 }
 
@@ -142,6 +148,8 @@ func createTLSConfig(c *ClusterConfig) (*tls.Config, error) {
 	if c.TLS.CertFile != "" && c.TLS.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(c.TLS.CertFile, c.TLS.KeyFile)
 		if err != nil {
+			logger.Warn("Failed to load client cert/key pair",
+				zap.Error(err))
 			return nil, errors.Wrap(err, "failed to load client cert/key pair")
 		}
 		tlsConfig.Certificates = []tls.Certificate{cert}
@@ -150,10 +158,14 @@ func createTLSConfig(c *ClusterConfig) (*tls.Config, error) {
 	if c.TLS.CAFile != "" {
 		caData, err := os.ReadFile(c.TLS.CAFile)
 		if err != nil {
+			logger.Warn("Failed to read CA file",
+				zap.Error(err))
 			return nil, errors.Wrap(err, "failed to read CA file")
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caData) {
+			logger.Warn("Failed to append CA certificate",
+				zap.Error(err))
 			return nil, fmt.Errorf("failed to append CA certificate")
 		}
 		tlsConfig.RootCAs = pool
@@ -187,8 +199,12 @@ func tx(txs ...backoff.Operation) []backoff.Operation {
 // Returns an operation that can be used with pipeline()
 func get(cli *clientv3.Client, key string, dst *bytes.Buffer) backoff.Operation {
 	return func() error {
+		start := time.Now()
 		resp, err := cli.Get(context.Background(), key)
 		if err != nil {
+			logger.Warn("Failed to retrieve value from etcd",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "failed to retrieve value from etcd")
 		}
 
@@ -198,12 +214,21 @@ func get(cli *clientv3.Client, key string, dst *bytes.Buffer) backoff.Operation 
 
 		b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
 		if err != nil {
+			logger.Warn("Failed to decode base64 value from etcd",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "failed to decode base64 value from etcd")
 		}
 
 		if _, err := dst.Write(b); err != nil {
+			logger.Warn("Failed to write etcd value to destination buffer",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "failed to write etcd value to destination buffer")
 		}
+		logger.Info("Retrieved value from etcd",
+			zap.String("key", key),
+			zap.Duration("duration", time.Since(start)))
 		return nil
 	}
 }
@@ -219,11 +244,18 @@ func get(cli *clientv3.Client, key string, dst *bytes.Buffer) backoff.Operation 
 // Returns an operation that can be used with pipeline()
 func set(cli *clientv3.Client, key string, value []byte) backoff.Operation {
 	return func() error {
+		start := time.Now()
 		encodedValue := base64.StdEncoding.EncodeToString(value)
 		_, err := cli.Put(context.Background(), key, encodedValue)
 		if err != nil {
+			logger.Warn("Failed to set key value",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "set: failed to set key value")
 		}
+		logger.Info("Set key value",
+			zap.String("key", key),
+			zap.Duration("duration", time.Since(start)))
 		return nil
 	}
 }
@@ -237,10 +269,17 @@ func set(cli *clientv3.Client, key string, value []byte) backoff.Operation {
 // Returns an operation that can be used with pipeline()
 func del(cli *clientv3.Client, key string) backoff.Operation {
 	return func() error {
+		start := time.Now()
 		_, err := cli.Delete(context.Background(), key)
 		if err != nil {
+			logger.Warn("Failed to delete key",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrapf(err, "del: failed to delete key: %s", key)
 		}
+		logger.Info("Deleted key",
+			zap.String("key", key),
+			zap.Duration("duration", time.Since(start)))
 		return nil
 	}
 }
@@ -256,14 +295,24 @@ func del(cli *clientv3.Client, key string) backoff.Operation {
 // Returns an operation that can be used with pipeline()
 func setMD(cli *clientv3.Client, key string, m Metadata) backoff.Operation {
 	return func() error {
+		start := time.Now()
 		jsdata, err := json.Marshal(m)
 		if err != nil {
+			logger.Warn("Failed to marshal metadata",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "setmd: failed to marshal metadata")
 		}
 		_, err = cli.Put(context.Background(), key, base64.StdEncoding.EncodeToString(jsdata))
 		if err != nil {
+			logger.Warn("Failed to set metadata value",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "setmd: failed to set metadata value")
 		}
+		logger.Info("Set metadata value",
+			zap.String("key", key),
+			zap.Duration("duration", time.Since(start)))
 		return nil
 	}
 }
@@ -280,9 +329,13 @@ func setMD(cli *clientv3.Client, key string, m Metadata) backoff.Operation {
 // Returns an operation that can be used with pipeline()
 func getMD(cli *clientv3.Client, key string, m *Metadata) backoff.Operation {
 	return func() error {
+		start := time.Now()
 		// Try direct file lookup first
 		resp, err := cli.Get(context.Background(), key)
 		if err != nil {
+			logger.Warn("Failed to get metadata response",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "getmd: failed to get metadata response")
 		}
 		if len(resp.Kvs) > 0 {
@@ -292,6 +345,9 @@ func getMD(cli *clientv3.Client, key string, m *Metadata) backoff.Operation {
 		// Look for children by using the key as a prefix
 		dirResp, err := cli.Get(context.Background(), key+"/", clientv3.WithPrefix())
 		if err != nil {
+			logger.Warn("Failed to get directory contents",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "getmd: failed to get directory contents")
 		}
 
@@ -325,6 +381,9 @@ func getMD(cli *clientv3.Client, key string, m *Metadata) backoff.Operation {
 				m.Timestamp = md1.Timestamp
 			}
 		}
+		logger.Info("Got metadata",
+			zap.String("key", key),
+			zap.Duration("duration", time.Since(start)))
 		return nil
 	}
 }
@@ -339,13 +398,19 @@ func getMD(cli *clientv3.Client, key string, m *Metadata) backoff.Operation {
 // Returns an error if decoding or unmarshaling fails
 func unmarshalMDv3(value []byte, m *Metadata) error {
 	if m == nil {
+		logger.Warn("Metadata is nil",
+			zap.Error(errors.New("unmarshalMD: metadata is nil")))
 		return errors.New("unmarshalMD: metadata is nil")
 	}
 	bjson, err := base64.StdEncoding.DecodeString(string(value))
 	if err != nil {
+		logger.Warn("Failed to decode metadata",
+			zap.Error(err))
 		return errors.Wrap(err, "getmd: failed to decode metadata")
 	}
 	if err := json.Unmarshal(bjson, m); err != nil {
+		logger.Warn("Failed to unmarshal metadata response",
+			zap.Error(err))
 		return errors.Wrap(err, "getmd: failed to unmarshal metadata response")
 	}
 	return nil
@@ -383,11 +448,19 @@ func noop() backoff.Operation {
 // Returns an operation that can be used with pipeline()
 func exists(cli *clientv3.Client, key string, out *bool) backoff.Operation {
 	return func() error {
+		start := time.Now()
 		resp, err := cli.Get(context.Background(), key)
 		if err != nil {
+			logger.Warn("Failed to check key",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "exists: failed to check key")
 		}
 		*out = len(resp.Kvs) > 0
+		logger.Info("Checked key",
+			zap.String("key", key),
+			zap.Bool("exists", *out),
+			zap.Duration("duration", time.Since(start)))
 		return nil
 	}
 }
@@ -411,9 +484,17 @@ func exists(cli *clientv3.Client, key string, out *bool) backoff.Operation {
 //
 // Returns the KeyValue pairs and any error that occurred
 func list(cli *clientv3.Client, key string) ([]*mvccpb.KeyValue, error) {
+	start := time.Now()
 	resp, err := cli.Get(context.Background(), key, clientv3.WithPrefix())
 	if err != nil {
+		logger.Warn("Failed to get list",
+			zap.String("key", key),
+			zap.Error(err))
 		return nil, errors.Wrap(err, "list: unable to get list")
 	}
+	logger.Info("Got list",
+		zap.String("key", key),
+		zap.Int("count", len(resp.Kvs)),
+		zap.Duration("duration", time.Since(start)))
 	return resp.Kvs, nil
 }

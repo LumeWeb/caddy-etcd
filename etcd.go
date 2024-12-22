@@ -15,6 +15,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // token is a random value used to manage locks
@@ -89,6 +91,10 @@ func init() {
 // While best efforts are made to maintain consistency, prolonged etcd unavailability may impact
 // the system's ability to recover to a fully coherent state.
 func NewService(c *ClusterConfig) (Service, error) {
+	logger.Info("Initializing etcd service",
+		zap.String("prefix", c.KeyPrefix),
+		zap.Strings("endpoints", c.ServerIP))
+
 	cli, err := getClient(c)
 	if err != nil {
 		return nil, err
@@ -112,6 +118,9 @@ type etcdsrv struct {
 
 // Lock acquires a lock with a maximum lifetime specified by the ClusterConfig
 func (e *etcdsrv) Lock(key string) error {
+	logger.Info("Acquiring lock",
+		zap.String("key", key),
+		zap.Duration("timeout", e.cfg.LockTimeout.Duration))
 	return e.lock(token, key)
 }
 
@@ -124,8 +133,12 @@ func (e *etcdsrv) lock(tok string, key string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 		defer cancel()
 
+		start := time.Now()
 		resp, err := e.cli.Get(ctx, lockKey)
 		if err != nil {
+			logger.Warn("Failed to get existing lock",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "lock: failed to get existing lock")
 		}
 
@@ -136,13 +149,22 @@ func (e *etcdsrv) lock(tok string, key string) error {
 			var l Lock
 			b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
 			if err != nil {
+				logger.Warn("Failed to decode base64 lock representation",
+					zap.String("key", key),
+					zap.Error(err))
 				return errors.Wrap(err, "lock: failed to decode base64 lock representation")
 			}
 			if err := json.Unmarshal(b, &l); err != nil {
+				logger.Warn("Failed to unmarshal existing lock",
+					zap.String("key", key),
+					zap.Error(err))
 				return errors.Wrap(err, "lock: failed to unmarshal existing lock")
 			}
 			var lockTime time.Time
 			if err := lockTime.UnmarshalText([]byte(l.Obtained)); err != nil {
+				logger.Warn("Failed to unmarshal time",
+					zap.String("key", key),
+					zap.Error(err))
 				return errors.Wrap(err, "lock: failed to unmarshal time")
 			}
 
@@ -159,6 +181,9 @@ func (e *etcdsrv) lock(tok string, key string) error {
 		if okToSet {
 			now, err := time.Now().UTC().MarshalText()
 			if err != nil {
+				logger.Warn("Failed to marshal current UTC time",
+					zap.String("key", key),
+					zap.Error(err))
 				return errors.Wrap(err, "lock: failed to marshal current UTC time")
 			}
 			l := Lock{
@@ -168,14 +193,25 @@ func (e *etcdsrv) lock(tok string, key string) error {
 			}
 			b, err := json.Marshal(l)
 			if err != nil {
+				logger.Warn("Failed to marshal new lock",
+					zap.String("key", key),
+					zap.Error(err))
 				return errors.Wrap(err, "lock: failed to marshal new lock")
 			}
 			_, err = e.cli.Put(ctx, lockKey, base64.StdEncoding.EncodeToString(b))
 			if err != nil {
+				logger.Warn("Failed to get lock",
+					zap.String("key", key),
+					zap.Error(err))
 				return errors.Wrap(err, "failed to get lock")
 			}
+			logger.Info("Acquired lock",
+				zap.String("key", key),
+				zap.Duration("duration", time.Since(start)))
 			return nil
 		}
+		logger.Warn("Lock already exists",
+			zap.String("key", key))
 		return LockError{
 			Key:     key,
 			Timeout: e.cfg.LockTimeout.Duration,
@@ -187,14 +223,23 @@ func (e *etcdsrv) lock(tok string, key string) error {
 
 // Unlock releases the lock for the given key
 func (e *etcdsrv) Unlock(key string) error {
+	logger.Info("Releasing lock",
+		zap.String("key", key))
 	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
+	start := time.Now()
 	release := func() error {
 		_, err := e.cli.Delete(ctx, path.Join(e.lockKey, key))
 		if err != nil {
+			logger.Warn("Failed to release lock",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "failed to release lock")
 		}
+		logger.Info("Released lock",
+			zap.String("key", key),
+			zap.Duration("duration", time.Since(start)))
 		return nil
 	}
 	return e.execute(release)
@@ -226,11 +271,20 @@ func (e *etcdsrv) List(key string, filters ...func(*mvccpb.KeyValue) bool) ([]st
 	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
+	start := time.Now()
 	// Get all keys with the prefix
 	resp, err := e.cli.Get(ctx, searchKey, clientv3.WithPrefix())
 	if err != nil {
+		logger.Warn("Failed to get keys",
+			zap.String("key", key),
+			zap.Error(err))
 		return nil, errors.Wrap(err, "List: failed to get keys")
 	}
+
+	logger.Info("Listed keys",
+		zap.String("key", key),
+		zap.Int("count", len(resp.Kvs)),
+		zap.Duration("duration", time.Since(start)))
 
 	var out []string
 	prefixLen := len(e.cfg.KeyPrefix)
@@ -273,6 +327,10 @@ func (e *etcdsrv) List(key string, filters ...func(*mvccpb.KeyValue) bool) ([]st
 }
 
 func (e *etcdsrv) Store(key string, value []byte) error {
+	logger.Info("Storing value",
+		zap.String("key", key),
+		zap.Int("size", len(value)))
+
 	storageKey := path.Join(e.cfg.KeyPrefix, key)
 	storageKeyMD := path.Join(e.mdPrefix, key)
 	md := NewMetadata(key, value)
@@ -280,16 +338,22 @@ func (e *etcdsrv) Store(key string, value []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
+	start := time.Now()
 	resp, err := e.cli.Get(ctx, storageKeyMD)
 	if err != nil {
+		logger.Warn("Failed to check metadata",
+			zap.String("key", key),
+			zap.Error(err))
 		return errors.Wrap(err, "store: failed to check metadata")
 	}
 
 	txn := e.cli.Txn(ctx)
-
 	if len(resp.Kvs) > 0 {
 		mdBytes, err := json.Marshal(md)
 		if err != nil {
+			logger.Warn("Failed to marshal metadata",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "store: failed to marshal metadata")
 		}
 		mdEncoded := base64.StdEncoding.EncodeToString(mdBytes)
@@ -301,6 +365,9 @@ func (e *etcdsrv) Store(key string, value []byte) error {
 	} else {
 		mdBytes, err := json.Marshal(md)
 		if err != nil {
+			logger.Warn("Failed to marshal metadata",
+				zap.String("key", key),
+				zap.Error(err))
 			return errors.Wrap(err, "store: failed to marshal metadata")
 		}
 		mdEncoded := base64.StdEncoding.EncodeToString(mdBytes)
@@ -313,66 +380,108 @@ func (e *etcdsrv) Store(key string, value []byte) error {
 
 	txnResp, err := txn.Commit()
 	if err != nil {
+		logger.Warn("Failed to commit transaction",
+			zap.String("key", key),
+			zap.Error(err))
 		return errors.Wrap(err, "store: failed to commit transaction")
 	}
 	if !txnResp.Succeeded {
+		logger.Warn("Transaction failed",
+			zap.String("key", key))
 		return errors.New("store: transaction failed")
 	}
 
+	logger.Info("Stored value",
+		zap.String("key", key),
+		zap.Duration("duration", time.Since(start)))
 	return nil
 }
 
 func (e *etcdsrv) Load(key string) ([]byte, error) {
-	storageKey := path.Join(e.cfg.KeyPrefix, key)
-	storageKeyMD := path.Join(e.mdPrefix, key)
+	logger.Info("Loading value",
+		zap.String("key", key))
 
-	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration) // Increased timeout
-	defer cancel()
-
-	resp, err := e.cli.Get(ctx, storageKeyMD)
-	if err != nil {
-		return nil, errors.Wrap(err, "load: failed to get metadata")
-	}
-	if len(resp.Kvs) == 0 {
-		return nil, NotExist{key}
-	}
-
-	md := new(Metadata)
-	b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
-	if err != nil {
-		return nil, errors.Wrap(err, "load: failed to decode metadata")
-	}
-	if err := json.Unmarshal(b, md); err != nil {
-		return nil, errors.Wrap(err, "load: failed to unmarshal metadata")
-	}
-
-	valueResp, err := e.cli.Get(ctx, storageKey)
-	if err != nil {
-		return nil, errors.Wrap(err, "load: failed to get value")
-	}
-	if len(valueResp.Kvs) == 0 {
-		return nil, errors.New("load: value not found but metadata exists")
-	}
-
-	value, err := base64.StdEncoding.DecodeString(string(valueResp.Kvs[0].Value))
-	if err != nil {
-		return nil, errors.Wrap(err, "load: failed to decode value")
-	}
-
-	if sha1.Sum(value) != md.Hash {
-		return nil, FailedChecksum{key}
-	}
-
-	return value, nil
-}
-
-func (e *etcdsrv) Delete(key string) error {
 	storageKey := path.Join(e.cfg.KeyPrefix, key)
 	storageKeyMD := path.Join(e.mdPrefix, key)
 
 	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
+	start := time.Now()
+	// Try direct file lookup first
+	resp, err := e.cli.Get(ctx, storageKeyMD)
+	if err != nil {
+		logger.Warn("Failed to get metadata",
+			zap.String("key", key),
+			zap.Error(err))
+		return nil, errors.Wrap(err, "load: failed to get metadata")
+	}
+	if len(resp.Kvs) == 0 {
+		logger.Warn("Value not found",
+			zap.String("key", key))
+		return nil, NotExist{key}
+	}
+
+	md := new(Metadata)
+	b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
+	if err != nil {
+		logger.Warn("Failed to decode metadata",
+			zap.String("key", key),
+			zap.Error(err))
+		return nil, errors.Wrap(err, "load: failed to decode metadata")
+	}
+	if err := json.Unmarshal(b, md); err != nil {
+		logger.Warn("Failed to unmarshal metadata",
+			zap.String("key", key),
+			zap.Error(err))
+		return nil, errors.Wrap(err, "load: failed to unmarshal metadata")
+	}
+
+	valueResp, err := e.cli.Get(ctx, storageKey)
+	if err != nil {
+		logger.Warn("Failed to get value",
+			zap.String("key", key),
+			zap.Error(err))
+		return nil, errors.Wrap(err, "load: failed to get value")
+	}
+	if len(valueResp.Kvs) == 0 {
+		logger.Warn("Value not found but metadata exists",
+			zap.String("key", key))
+		return nil, errors.New("load: value not found but metadata exists")
+	}
+
+	value, err := base64.StdEncoding.DecodeString(string(valueResp.Kvs[0].Value))
+	if err != nil {
+		logger.Warn("Failed to decode value",
+			zap.String("key", key),
+			zap.Error(err))
+		return nil, errors.Wrap(err, "load: failed to decode value")
+	}
+
+	if sha1.Sum(value) != md.Hash {
+		logger.Warn("Checksum mismatch",
+			zap.String("key", key))
+		return nil, FailedChecksum{key}
+	}
+
+	logger.Info("Loaded value",
+		zap.String("key", key),
+		zap.Int("size", len(value)),
+		zap.Duration("duration", time.Since(start)))
+	return value, nil
+}
+
+func (e *etcdsrv) Delete(key string) error {
+	logger.Info("Deleting value",
+		zap.String("key", key))
+
+	storageKey := path.Join(e.cfg.KeyPrefix, key)
+	storageKeyMD := path.Join(e.mdPrefix, key)
+
+	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
+	defer cancel()
+
+	start := time.Now()
 	txn := e.cli.Txn(ctx)
 	txn.Then(
 		clientv3.OpDelete(storageKey),
@@ -381,47 +490,76 @@ func (e *etcdsrv) Delete(key string) error {
 
 	txnResp, err := txn.Commit()
 	if err != nil {
+		logger.Warn("Failed to commit transaction",
+			zap.String("key", key),
+			zap.Error(err))
 		return errors.Wrap(err, "delete: failed to commit transaction")
 	}
 	if !txnResp.Succeeded {
+		logger.Warn("Transaction failed",
+			zap.String("key", key))
 		return errors.New("delete: transaction failed")
 	}
 
+	logger.Info("Deleted value",
+		zap.String("key", key),
+		zap.Duration("duration", time.Since(start)))
 	return nil
 }
 
 func (e *etcdsrv) Metadata(key string) (*Metadata, error) {
+	logger.Info("Getting metadata",
+		zap.String("key", key))
+
 	storageKeyMD := path.Join(e.mdPrefix, key)
 
 	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 	defer cancel()
 
+	start := time.Now()
 	// Try direct file lookup first
 	resp, err := e.cli.Get(ctx, storageKeyMD)
 	if err != nil {
-		return nil, errors.Wrap(err, "metadata: failed to get key")
+		logger.Warn("Failed to get metadata",
+			zap.String("key", key),
+			zap.Error(err))
+		return nil, errors.Wrap(err, "metadata: failed to get metadata")
 	}
 
 	if len(resp.Kvs) > 0 {
 		md := new(Metadata)
 		b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
 		if err != nil {
-			return nil, errors.Wrap(err, "metadata: failed to decode base64")
+			logger.Warn("Failed to decode metadata",
+				zap.String("key", key),
+				zap.Error(err))
+			return nil, errors.Wrap(err, "metadata: failed to decode metadata")
 		}
 		if err := json.Unmarshal(b, md); err != nil {
-			return nil, errors.Wrap(err, "metadata: failed to unmarshal")
+			logger.Warn("Failed to unmarshal metadata",
+				zap.String("key", key),
+				zap.Error(err))
+			return nil, errors.Wrap(err, "metadata: failed to unmarshal metadata")
 		}
 		md.Path = key
+		logger.Info("Got metadata",
+			zap.String("key", key),
+			zap.Duration("duration", time.Since(start)))
 		return md, nil
 	}
 
 	// Look for children to determine if it's a directory
 	dirResp, err := e.cli.Get(ctx, storageKeyMD+"/", clientv3.WithPrefix())
 	if err != nil {
+		logger.Warn("Failed to get directory contents",
+			zap.String("key", key),
+			zap.Error(err))
 		return nil, errors.Wrap(err, "metadata: failed to get directory contents")
 	}
 
 	if len(dirResp.Kvs) == 0 {
+		logger.Warn("Value not found",
+			zap.String("key", key))
 		return nil, NotExist{key}
 	}
 
@@ -450,6 +588,9 @@ func (e *etcdsrv) Metadata(key string) (*Metadata, error) {
 		md.Timestamp = time.Now().UTC()
 	}
 
+	logger.Info("Got metadata",
+		zap.String("key", key),
+		zap.Duration("duration", time.Since(start)))
 	return md, nil
 }
 
