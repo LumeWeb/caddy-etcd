@@ -83,6 +83,7 @@ type ClusterConfig struct {
 	TLS              TLSConfig        `json:"tls,omitempty"`
 	Auth             AuthConfig       `json:"auth,omitempty"`
 	Connection       ConnectionConfig `json:"connection,omitempty"`
+	options          []ConfigOption
 }
 
 // WithDialTimeout sets the dial timeout for etcd connections
@@ -357,11 +358,8 @@ func NewClusterConfig(opts ...ConfigOption) (*ClusterConfig, error) {
 			return nil, err
 		}
 	}
-	if len(c.ServerIP) == 0 {
-		defaultServerIP := "http://127.0.0.1:2379"
-		c.ServerIP = []string{defaultServerIP}
-		fmt.Printf("No endpoints provided, defaulting to %s\n", defaultServerIP)
-	}
+
+	c.options = opts
 
 	// Validate the configuration
 	if err := c.Validate(); err != nil {
@@ -401,6 +399,10 @@ func (c *ClusterConfig) Validate() error {
 		if err := validateServerURL(server); err != nil {
 			return errors.Wrap(err, "invalid server URL")
 		}
+	}
+
+	if (c.ServerIP == nil || len(c.ServerIP) == 0) && len(c.options) > 0 {
+		return errors.New("endpoints is required")
 	}
 
 	// Validate timeout
