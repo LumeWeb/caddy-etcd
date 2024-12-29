@@ -44,9 +44,10 @@ type Service interface {
 // the same lock from multiple goroutines simultaneously. Such usage may result
 // in race conditions where the last write wins.
 type Lock struct {
-	Token    string // Random token identifying the client holding the lock
-	Obtained string // UTC timestamp when the lock was obtained
-	Key      string // The key being locked
+	Token    string        // Random token identifying the client holding the lock
+	Obtained string        // UTC timestamp when the lock was obtained
+	Key      string        // The key being locked
+	LeaseID  clientv3.LeaseID // Lease ID associated with this lock
 }
 
 // Metadata stores information about a particular node that represents a file in etcd
@@ -95,25 +96,31 @@ func NewService(c *ClusterConfig) (Service, error) {
 		zap.String("prefix", c.KeyPrefix),
 		zap.Strings("endpoints", c.ServerIP))
 
+	// Create single client
 	cli, err := getClient(c)
 	if err != nil {
 		return nil, err
 	}
 
+	// Create rate limiter (100 ops/sec with burst of 200)
+	limiter := newRateLimiter(100, 200)
+
 	return &etcdsrv{
-		mdPrefix: path.Join(c.KeyPrefix + "/md"),
-		lockKey:  path.Join(c.KeyPrefix, "/lock"),
-		cfg:      c,
-		cli:      cli,
+		mdPrefix:    path.Join(c.KeyPrefix + "/md"),
+		lockKey:     path.Join(c.KeyPrefix, "/lock"),
+		cfg:         c,
+		cli:         cli,
+		rateLimiter: limiter,
 	}, nil
 }
 
 type etcdsrv struct {
-	mdPrefix  string
-	lockKey   string
-	cfg       *ClusterConfig
-	cli       *clientv3.Client
-	noBackoff bool
+	mdPrefix    string
+	lockKey     string
+	cfg         *ClusterConfig
+	cli         *clientv3.Client
+	rateLimiter *rateLimiter
+	noBackoff   bool
 }
 
 // Lock acquires a lock with a maximum lifetime specified by the ClusterConfig
@@ -129,10 +136,19 @@ func (e *etcdsrv) lock(tok string, key string) error {
 	lockKey := path.Join(e.lockKey, key)
 
 	acquire := func() error {
-		// Use a longer timeout for lock operations
 		ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Connection.RequestTimeout.Duration)
 		defer cancel()
 
+		// Apply rate limiting
+		if err := e.rateLimiter.wait(ctx); err != nil {
+			return err
+		}
+
+		// Create lease
+		leaseResp, err := e.cli.Lease.Grant(ctx, int64(e.cfg.LockTimeout.Duration.Seconds()))
+		if err != nil {
+			return err
+		}
 		start := time.Now()
 		resp, err := e.cli.Get(ctx, lockKey)
 		if err != nil {
@@ -190,6 +206,7 @@ func (e *etcdsrv) lock(tok string, key string) error {
 				Token:    tok,
 				Obtained: string(now),
 				Key:      key,
+				LeaseID:  leaseResp.ID,
 			}
 			b, err := json.Marshal(l)
 			if err != nil {
@@ -230,13 +247,53 @@ func (e *etcdsrv) Unlock(key string) error {
 
 	start := time.Now()
 	release := func() error {
-		_, err := e.cli.Delete(ctx, path.Join(e.lockKey, key))
+		// Get the lock info first
+		resp, err := e.cli.Get(ctx, path.Join(e.lockKey, key))
 		if err != nil {
-			logger.Warn("Failed to release lock",
+			logger.Warn("Failed to get lock info",
 				zap.String("key", key),
 				zap.Error(err))
-			return errors.Wrap(err, "failed to release lock")
+			return errors.Wrap(err, "failed to get lock info")
 		}
+		
+		if len(resp.Kvs) == 0 {
+			// Lock doesn't exist, nothing to do
+			return nil
+		}
+
+		// Decode the lock
+		var l Lock
+		b, err := base64.StdEncoding.DecodeString(string(resp.Kvs[0].Value))
+		if err != nil {
+			logger.Warn("Failed to decode lock",
+				zap.String("key", key),
+				zap.Error(err))
+			return errors.Wrap(err, "failed to decode lock")
+		}
+		
+		if err := json.Unmarshal(b, &l); err != nil {
+			logger.Warn("Failed to unmarshal lock",
+				zap.String("key", key),
+				zap.Error(err))
+			return errors.Wrap(err, "failed to unmarshal lock")
+		}
+
+		// Only delete if we own the lock
+		if l.Token != token {
+			logger.Warn("Cannot unlock - lock owned by different client",
+				zap.String("key", key))
+			return errors.New("cannot unlock - lock owned by different client")
+		}
+
+		// Revoke the lease which will automatically delete the key
+		_, err = e.cli.Lease.Revoke(ctx, l.LeaseID)
+		if err != nil {
+			logger.Warn("Failed to revoke lease",
+				zap.String("key", key),
+				zap.Error(err))
+			return errors.Wrap(err, "failed to revoke lease")
+		}
+
 		logger.Info("Released lock",
 			zap.String("key", key),
 			zap.Duration("duration", time.Since(start)))
@@ -252,9 +309,9 @@ func (e *etcdsrv) execute(o backoff.Operation) error {
 		return o()
 	default:
 		b := backoff.NewExponentialBackOff()
-		b.MaxElapsedTime = 60 * time.Second
-		b.InitialInterval = 500 * time.Millisecond
-		b.MaxInterval = 10 * time.Second
+		b.MaxElapsedTime = 30 * time.Second
+		b.InitialInterval = 1 * time.Second
+		b.MaxInterval = 5 * time.Second
 		return backoff.Retry(o, b)
 	}
 }
@@ -345,6 +402,11 @@ func (e *etcdsrv) Store(key string, value []byte) error {
 			zap.String("key", key),
 			zap.Error(err))
 		return errors.Wrap(err, "store: failed to check metadata")
+	}
+
+	// Apply rate limiting
+	if err := e.rateLimiter.wait(ctx); err != nil {
+		return err
 	}
 
 	txn := e.cli.Txn(ctx)
