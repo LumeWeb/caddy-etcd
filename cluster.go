@@ -1,6 +1,10 @@
 // Package etcd implements a distributed storage backend for Caddy using etcd.
-// It provides cluster-wide synchronization of TLS certificates and other Caddy assets
-// using etcd as the distributed storage layer.
+//
+// Deprecated: This storage backend is deprecated and not recommended for production use.
+// The etcd implementation introduces significant operational complexity and potential
+// reliability challenges. For clustered storage needs, please consider using the S3
+// storage backend (github.com/techknowlogick/certmagic-s3) which provides better
+// reliability and simpler operations while meeting Caddy's distributed storage requirements.
 package etcd
 
 import (
